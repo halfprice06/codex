@@ -1480,8 +1480,8 @@ impl App {
                         .await
                     {
                         Ok(forked) => {
-                            if self.in_terminal_multiplexer() {
-                                if self
+                            if self.in_terminal_multiplexer()
+                                && self
                                     .try_spawn_fork_in_new_pane(
                                         forked.thread_id,
                                         &forked.thread,
@@ -1492,7 +1492,6 @@ impl App {
                                     tui.frame_requester().schedule_frame();
                                     return Ok(AppRunControl::Continue);
                                 }
-                            }
                             self.shutdown_current_thread().await;
                             let init = self.chatwidget_init_for_forked_or_resumed_thread(
                                 tui,

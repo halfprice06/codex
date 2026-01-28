@@ -7,7 +7,6 @@
 use super::*;
 use crate::app_event::AppEvent;
 use crate::app_event::ExitMode;
-use crate::app_event::ForkPanePlacement;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::FeedbackAudience;
 use crate::bottom_pane::LocalImageAttachment;
