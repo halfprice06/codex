@@ -320,6 +320,8 @@ pub struct Config {
 
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
+    /// Optional override for the Codex Apps MCP endpoint URL.
+    pub apps_mcp_url: Option<String>,
 
     /// When set, restricts ChatGPT login to a specific workspace identifier.
     pub forced_chatgpt_workspace_id: Option<String>,
@@ -978,6 +980,8 @@ pub struct ConfigToml {
 
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,
+    /// Optional override for the Codex Apps MCP endpoint URL.
+    pub apps_mcp_url: Option<String>,
 
     pub projects: Option<HashMap<String, ProjectConfig>>,
 
@@ -1755,6 +1759,10 @@ impl Config {
                 .chatgpt_base_url
                 .or(cfg.chatgpt_base_url)
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
+            apps_mcp_url: cfg
+                .apps_mcp_url
+                .map(|url| url.trim().to_string())
+                .filter(|url| !url.is_empty()),
             forced_chatgpt_workspace_id,
             forced_login_method,
             include_apply_patch_tool: include_apply_patch_tool_flag,
@@ -4040,6 +4048,7 @@ model_verbosity = "high"
                 model_verbosity: None,
                 personality: Some(Personality::Pragmatic),
                 chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
+                apps_mcp_url: None,
                 base_instructions: None,
                 developer_instructions: None,
                 compact_prompt: None,
@@ -4129,6 +4138,7 @@ model_verbosity = "high"
             model_verbosity: None,
             personality: Some(Personality::Pragmatic),
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
+            apps_mcp_url: None,
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
@@ -4233,6 +4243,7 @@ model_verbosity = "high"
             model_verbosity: None,
             personality: Some(Personality::Pragmatic),
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
+            apps_mcp_url: None,
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
@@ -4323,6 +4334,7 @@ model_verbosity = "high"
             model_verbosity: Some(Verbosity::High),
             personality: Some(Personality::Pragmatic),
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
+            apps_mcp_url: None,
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,

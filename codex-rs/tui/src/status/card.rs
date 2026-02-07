@@ -63,6 +63,7 @@ struct StatusHistoryCell {
     model_details: Vec<String>,
     directory: PathBuf,
     approval: String,
+    app_mcp_url: Option<String>,
     sandbox: String,
     agents_summary: String,
     collaboration_mode: Option<String>,
@@ -196,6 +197,7 @@ impl StatusHistoryCell {
             model_details,
             directory: config.cwd.clone(),
             approval,
+            app_mcp_url: config.apps_mcp_url.clone(),
             sandbox,
             agents_summary,
             collaboration_mode: collaboration_mode.map(ToString::to_string),
@@ -384,6 +386,9 @@ impl HistoryCell for StatusHistoryCell {
         let mut seen: BTreeSet<String> = labels.iter().cloned().collect();
         let thread_name = self.thread_name.as_deref().filter(|name| !name.is_empty());
 
+        if self.app_mcp_url.is_some() {
+            push_label(&mut labels, &mut seen, "App MCP URL");
+        }
         if self.model_provider.is_some() {
             push_label(&mut labels, &mut seen, "Model provider");
         }
@@ -445,6 +450,9 @@ impl HistoryCell for StatusHistoryCell {
         lines.push(formatter.line("Directory", vec![Span::from(directory_value)]));
         lines.push(formatter.line("Approval", vec![Span::from(self.approval.clone())]));
         lines.push(formatter.line("Sandbox", vec![Span::from(self.sandbox.clone())]));
+        if let Some(app_mcp_url) = self.app_mcp_url.as_ref() {
+            lines.push(formatter.line("App MCP URL", vec![Span::from(app_mcp_url.clone())]));
+        }
         lines.push(formatter.line("Agents.md", vec![Span::from(self.agents_summary.clone())]));
 
         if let Some(account_value) = account_value {

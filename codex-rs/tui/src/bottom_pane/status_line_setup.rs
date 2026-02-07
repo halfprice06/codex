@@ -62,6 +62,9 @@ pub(crate) enum StatusLineItem {
     /// Current git branch name (if in a repository).
     GitBranch,
 
+    /// URL for the configured MCP service endpoint.
+    AppMcpUrl,
+
     /// Percentage of context window remaining.
     ContextRemaining,
 
@@ -102,6 +105,7 @@ impl StatusLineItem {
             StatusLineItem::CurrentDir => "Current working directory",
             StatusLineItem::ProjectRoot => "Project root directory (omitted when unavailable)",
             StatusLineItem::GitBranch => "Current Git branch (omitted when unavailable)",
+            StatusLineItem::AppMcpUrl => "MCP endpoint URL used by the app",
             StatusLineItem::ContextRemaining => {
                 "Percentage of context window remaining (omitted when unknown)"
             }
@@ -138,6 +142,7 @@ impl StatusLineItem {
             StatusLineItem::CurrentDir => "~/project/path",
             StatusLineItem::ProjectRoot => "~/project",
             StatusLineItem::GitBranch => "feat/awesome-feature",
+            StatusLineItem::AppMcpUrl => "https://connectors.example.internal/v1/connectors/mcp/",
             StatusLineItem::ContextRemaining => "18% left",
             StatusLineItem::ContextUsed => "82% used",
             StatusLineItem::FiveHourLimit => "5h 100%",

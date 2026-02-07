@@ -89,7 +89,15 @@ fn codex_apps_mcp_server_config(config: &Config, auth: Option<&CodexAuth>) -> Mc
     } else {
         codex_apps_mcp_http_headers(auth)
     };
-    let url = codex_apps_mcp_url(&config.chatgpt_base_url);
+    let url = config
+        .apps_mcp_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map_or_else(
+            || codex_apps_mcp_url(&config.chatgpt_base_url),
+            ToString::to_string,
+        );
 
     McpServerConfig {
         transport: McpServerTransportConfig::StreamableHttp {
