@@ -538,7 +538,7 @@ async fn submission_with_remote_and_local_images_keeps_local_placeholder_numberi
     let remote_url = "https://example.com/remote.png".to_string();
     chat.set_pending_non_editable_image_urls(vec![remote_url.clone()]);
 
-    let placeholder = "[Image #1]";
+    let placeholder = "[Image #2]";
     let text = format!("{placeholder} submit mixed");
     let text_elements = vec![TextElement::new(
         (0..placeholder.len()).into(),
@@ -548,6 +548,10 @@ async fn submission_with_remote_and_local_images_keeps_local_placeholder_numberi
 
     chat.bottom_pane
         .set_composer_text(text.clone(), text_elements.clone(), local_images.clone());
+    assert_eq!(
+        chat.bottom_pane.composer_text(),
+        "[Image #1]\n[Image #2] submit mixed"
+    );
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     let items = match next_submit_op(&mut op_rx) {
@@ -574,7 +578,7 @@ async fn submission_with_remote_and_local_images_keeps_local_placeholder_numberi
             text_elements: text_elements.clone(),
         }
     );
-    assert_eq!(text_elements[0].placeholder(&text), Some("[Image #1]"));
+    assert_eq!(text_elements[0].placeholder(&text), Some("[Image #2]"));
 
     let mut user_cell = None;
     while let Ok(ev) = rx.try_recv() {
@@ -628,6 +632,7 @@ async fn enter_with_only_pending_remote_images_submits_user_turn() {
 
     let remote_url = "https://example.com/remote-only.png".to_string();
     chat.set_pending_non_editable_image_urls(vec![remote_url.clone()]);
+    assert_eq!(chat.bottom_pane.composer_text(), "[Image #1]\n");
 
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
