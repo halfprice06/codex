@@ -1320,6 +1320,11 @@ pub struct ThreadStartParams {
     #[experimental("thread/start.experimentalRawEvents")]
     #[serde(default)]
     pub experimental_raw_events: bool,
+    /// If true, persist additional rollout EventMsg variants required to
+    /// reconstruct a richer thread history on resume/fork/read.
+    #[experimental("thread/start.persistFullHistory")]
+    #[serde(default)]
+    pub persist_full_history: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, JsonSchema, TS)]
@@ -1401,6 +1406,11 @@ pub struct ThreadResumeParams {
     pub developer_instructions: Option<String>,
     #[ts(optional = nullable)]
     pub personality: Option<Personality>,
+    /// If true, persist additional rollout EventMsg variants required to
+    /// reconstruct a richer thread history on subsequent resume/fork/read.
+    #[experimental("thread/resume.persistFullHistory")]
+    #[serde(default)]
+    pub persist_full_history: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1454,6 +1464,11 @@ pub struct ThreadForkParams {
     pub base_instructions: Option<String>,
     #[ts(optional = nullable)]
     pub developer_instructions: Option<String>,
+    /// If true, persist additional rollout EventMsg variants required to
+    /// reconstruct a richer thread history on subsequent resume/fork/read.
+    #[experimental("thread/fork.persistFullHistory")]
+    #[serde(default)]
+    pub persist_full_history: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
