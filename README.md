@@ -7,6 +7,26 @@
 If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
 </br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
 
+## Running this fork locally
+
+If you are sharing a fork and want others to run your exact branch:
+
+```shell
+# 1) Clone your fork and checkout your branch
+git clone https://github.com/<your-username>/codex.git
+cd codex
+git checkout <your-branch>
+
+# 2) Build the CLI
+cd codex-rs
+cargo build -p codex-cli
+
+# 3) Run it
+./target/debug/codex
+```
+
+If you want the full setup (toolchain, dependencies, and packaging details), see [`docs/install.md`](./docs/install.md).
+
 ---
 
 ## Quickstart

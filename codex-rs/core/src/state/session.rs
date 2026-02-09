@@ -57,6 +57,14 @@ impl SessionState {
         self.history.record_items(items, policy);
     }
 
+    pub(crate) fn record_items_untruncated<I>(&mut self, items: I)
+    where
+        I: IntoIterator,
+        I::Item: std::ops::Deref<Target = ResponseItem>,
+    {
+        self.history.record_items_untruncated(items);
+    }
+
     pub(crate) fn clone_history(&self) -> ContextManager {
         self.history.clone()
     }

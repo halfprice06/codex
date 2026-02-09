@@ -28,6 +28,8 @@ use crate::hooks::HookEvent;
 use crate::hooks::HookEventAfterAgent;
 use crate::hooks::Hooks;
 use crate::models_manager::manager::ModelsManager;
+use crate::native_rlm::maybe_run_turn as maybe_run_native_rlm_turn;
+use crate::native_rlm::should_disable_history_truncation as native_rlm_disable_history_truncation;
 use crate::parse_command::parse_command;
 use crate::parse_turn_item;
 use crate::rollout::session_index;
@@ -2045,13 +2047,18 @@ impl Session {
         rollout_items: &[RolloutItem],
     ) -> Vec<ResponseItem> {
         let mut history = ContextManager::new();
+        let disable_history_truncation = native_rlm_disable_history_truncation();
         for item in rollout_items {
             match item {
                 RolloutItem::ResponseItem(response_item) => {
-                    history.record_items(
-                        std::iter::once(response_item),
-                        turn_context.truncation_policy,
-                    );
+                    if disable_history_truncation {
+                        history.record_items_untruncated(std::iter::once(response_item));
+                    } else {
+                        history.record_items(
+                            std::iter::once(response_item),
+                            turn_context.truncation_policy,
+                        );
+                    }
                 }
                 RolloutItem::Compacted(compacted) => {
                     if let Some(replacement) = &compacted.replacement_history {
@@ -2091,7 +2098,11 @@ impl Session {
         turn_context: &TurnContext,
     ) {
         let mut state = self.state.lock().await;
-        state.record_items(items.iter(), turn_context.truncation_policy);
+        if native_rlm_disable_history_truncation() {
+            state.record_items_untruncated(items.iter());
+        } else {
+            state.record_items(items.iter(), turn_context.truncation_policy);
+        }
     }
 
     pub(crate) async fn record_model_warning(&self, message: impl Into<String>, ctx: &TurnContext) {
@@ -3843,6 +3854,52 @@ pub(crate) async fn run_turn(
     // one instance across retries within this turn.
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    match maybe_run_native_rlm_turn(
+        Arc::clone(&sess),
+        Arc::clone(&turn_context),
+        input.as_slice(),
+        &mut client_session,
+        turn_metadata_header.as_deref(),
+        cancellation_token.child_token(),
+    )
+    .await
+    {
+        Ok(Some(last_message)) => {
+            last_agent_message = Some(last_message.clone());
+            let sampling_request_input: Vec<ResponseItem> =
+                { sess.clone_history().await.for_prompt() };
+            let sampling_request_input_messages = sampling_request_input
+                .iter()
+                .filter_map(|item| match parse_turn_item(item) {
+                    Some(TurnItem::UserMessage(user_message)) => Some(user_message),
+                    _ => None,
+                })
+                .map(|user_message| user_message.message())
+                .collect::<Vec<String>>();
+            sess.hooks()
+                .dispatch(crate::hooks::HookPayload {
+                    session_id: sess.conversation_id,
+                    cwd: turn_context.cwd.clone(),
+                    triggered_at: chrono::Utc::now(),
+                    hook_event: HookEvent::AfterAgent {
+                        event: HookEventAfterAgent {
+                            thread_id: sess.conversation_id,
+                            turn_id: turn_context.sub_id.clone(),
+                            input_messages: sampling_request_input_messages,
+                            last_assistant_message: Some(last_message),
+                        },
+                    },
+                })
+                .await;
+            return last_agent_message;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            let event = EventMsg::Error(err.to_error_event(None));
+            sess.send_event(&turn_context, event).await;
+            return None;
+        }
+    }
 
     loop {
         // Note that pending_input would be something like a message the user

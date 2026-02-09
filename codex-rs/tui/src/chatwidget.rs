@@ -43,6 +43,7 @@ use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::text_formatting::proper_join;
 use crate::version::CODEX_CLI_VERSION;
+use crate::version::CODEX_DISPLAY_VERSION;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_backend_client::Client as BackendClient;
 use codex_chatgpt::connectors;
@@ -6283,7 +6284,7 @@ impl ChatWidget {
             placeholder_style,
             None,
             config.cwd.clone(),
-            CODEX_CLI_VERSION,
+            CODEX_DISPLAY_VERSION,
         ))
     }
 

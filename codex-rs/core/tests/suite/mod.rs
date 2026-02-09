@@ -88,6 +88,7 @@ mod model_switching;
 mod model_tools;
 mod models_cache_ttl;
 mod models_etag_responses;
+mod native_rlm;
 mod otel;
 mod pending_input;
 mod permissions_messages;
