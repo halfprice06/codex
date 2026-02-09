@@ -13,7 +13,6 @@ use codex_core::X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER;
 use codex_core::features::Feature;
 use codex_core::models_manager::manager::ModelsManager;
 use codex_core::protocol::SessionSource;
-use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_otel::OtelManager;
 use codex_otel::TelemetryAuthMode;
 use codex_otel::metrics::MetricsClient;
@@ -21,10 +20,8 @@ use codex_otel::metrics::MetricsConfig;
 use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ReasoningSummary;
-use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
-use codex_protocol::protocol::SandboxPolicy;
 use core_test_support::load_default_config_for_test;
 use core_test_support::responses::WebSocketConnectionConfig;
 use core_test_support::responses::WebSocketTestServer;
@@ -53,8 +50,6 @@ struct WebsocketTestHarness {
     model_info: ModelInfo,
     effort: Option<ReasoningEffortConfig>,
     summary: ReasoningSummary,
-    sandbox_policy: SandboxPolicy,
-    windows_sandbox_level: WindowsSandboxLevel,
     otel_manager: OtelManager,
 }
 
@@ -87,10 +82,7 @@ async fn responses_websocket_streams_request() {
         handshake.header(OPENAI_BETA_HEADER),
         Some(OPENAI_BETA_RESPONSES_WEBSOCKETS.to_string())
     );
-    assert!(
-        handshake.header("x-codex-sandbox").is_some(),
-        "missing x-codex-sandbox header"
-    );
+    assert_eq!(handshake.header("x-codex-sandbox"), None);
 
     server.shutdown().await;
 }
@@ -141,8 +133,6 @@ async fn responses_websocket_preconnect_is_reused_even_with_header_changes() {
             harness.effort,
             harness.summary,
             None,
-            &harness.sandbox_policy,
-            harness.windows_sandbox_level,
         )
         .await
         .expect("websocket stream failed");
@@ -288,8 +278,6 @@ async fn responses_websocket_emits_reasoning_included_event() {
             harness.effort,
             harness.summary,
             None,
-            &harness.sandbox_policy,
-            harness.windows_sandbox_level,
         )
         .await
         .expect("websocket stream failed");
@@ -361,8 +349,6 @@ async fn responses_websocket_emits_rate_limit_events() {
             harness.effort,
             harness.summary,
             None,
-            &harness.sandbox_policy,
-            harness.windows_sandbox_level,
         )
         .await
         .expect("websocket stream failed");
@@ -547,8 +533,6 @@ async fn responses_websocket_v2_after_error_uses_full_create_without_previous_re
             harness.effort,
             harness.summary,
             None,
-            &harness.sandbox_policy,
-            harness.windows_sandbox_level,
         )
         .await
         .expect("websocket stream failed");
@@ -727,8 +711,6 @@ async fn websocket_harness_with_options(
     .with_metrics(metrics);
     let effort = None;
     let summary = ReasoningSummary::Auto;
-    let sandbox_policy = config.sandbox_policy.get().clone();
-    let windows_sandbox_level = WindowsSandboxLevel::from_config(config.as_ref());
     let client = ModelClient::new(
         None,
         conversation_id,
@@ -748,8 +730,6 @@ async fn websocket_harness_with_options(
         model_info,
         effort,
         summary,
-        sandbox_policy,
-        windows_sandbox_level,
         otel_manager,
     }
 }
@@ -767,8 +747,6 @@ async fn stream_until_complete(
             harness.effort,
             harness.summary,
             None,
-            &harness.sandbox_policy,
-            harness.windows_sandbox_level,
         )
         .await
         .expect("websocket stream failed");
