@@ -167,6 +167,26 @@ fn filters_non_api_messages() {
 }
 
 #[test]
+fn record_items_untruncated_preserves_long_function_output() {
+    let long_output = "x".repeat(20_000);
+    let mut history = ContextManager::default();
+    history.record_items_untruncated(std::iter::once(&function_call_output(
+        "call-1",
+        &long_output,
+    )));
+
+    let items = history.raw_items();
+    assert_eq!(items.len(), 1);
+    let ResponseItem::FunctionCallOutput { output, .. } = &items[0] else {
+        panic!("expected function call output");
+    };
+    let FunctionCallOutputBody::Text(content) = &output.body else {
+        panic!("expected text body");
+    };
+    assert_eq!(content, &long_output);
+}
+
+#[test]
 fn non_last_reasoning_tokens_return_zero_when_no_user_messages() {
     let history = create_history_with_items(vec![reasoning_with_encrypted_content(800)]);
 

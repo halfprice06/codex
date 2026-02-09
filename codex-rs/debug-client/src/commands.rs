@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn parses_message() {
-        let result = parse_input("hello there").unwrap();
+        let result = parse_input("hello world there").unwrap();
         assert_eq!(
             result,
             Some(InputAction::Message("hello there".to_string()))

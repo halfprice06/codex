@@ -33,6 +33,8 @@ use crate::tooltips;
 use crate::ui_consts::LIVE_PREFIX_COLS;
 use crate::update_action::UpdateAction;
 use crate::version::CODEX_CLI_VERSION;
+use crate::version::CODEX_DISPLAY_NAME;
+use crate::version::CODEX_DISPLAY_VERSION;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
 use crate::wrapping::word_wrap_lines;
@@ -956,7 +958,7 @@ pub(crate) fn new_session_info(
         model.clone(),
         reasoning_effort,
         config.cwd.clone(),
-        CODEX_CLI_VERSION,
+        CODEX_DISPLAY_VERSION,
     );
     let mut parts: Vec<Box<dyn HistoryCell>> = vec![Box::new(header)];
 
@@ -1114,10 +1116,10 @@ impl HistoryCell for SessionHeaderHistoryCell {
 
         let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
 
-        // Title line rendered inside the box: ">_ OpenAI Codex (vX)"
+        // Title line rendered inside the box: ">_ OpenAI CodexRLM (vX)"
         let title_spans: Vec<Span<'static>> = vec![
             Span::from(">_ ").dim(),
-            Span::from("OpenAI Codex").bold(),
+            Span::from(CODEX_DISPLAY_NAME).bold(),
             Span::from(" ").dim(),
             Span::from(format!("(v{})", self.version)).dim(),
         ];
