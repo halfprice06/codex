@@ -507,6 +507,55 @@
       ],
       "type": "object"
     },
+    "NativeRlmToml": {
+      "additionalProperties": false,
+      "description": "Native RLM settings loaded from config.toml.\n\nThese values match the existing `CODEX_NATIVE_RLM*` environment controls so users can configure Native RLM directly in config instead of only via process env vars.",
+      "properties": {
+        "enabled": {
+          "description": "Enables Native RLM mode for agent turns.",
+          "type": "boolean"
+        },
+        "exec_timeout_ms": {
+          "description": "Timeout for each exec/tool call in milliseconds.",
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "llm_batch_concurrency": {
+          "description": "Parallel sub-LLM calls allowed in a batch.",
+          "format": "uint",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "max_iterations": {
+          "description": "Maximum number of native-RLM action iterations per turn.",
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "max_llm_calls": {
+          "description": "Maximum number of sub-LLM calls native-RLM may issue per turn.",
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "max_output_chars": {
+          "description": "Maximum characters captured from tool/stdout output per step.",
+          "format": "uint",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "python_command": {
+          "description": "Interpreter command used for the native-RLM Python REPL.",
+          "type": "string"
+        },
+        "verbose": {
+          "description": "Enables verbose native-RLM trajectory logging.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "Notice": {
       "description": "Settings for notices we display to users via the tui and app-server clients (primarily the Codex IDE extension). NOTE: these are different from notifications - notices are warnings, NUX screens, acknowledgements, etc.",
       "properties": {
@@ -1465,6 +1514,15 @@
         }
       ],
       "description": "Optional verbosity control for GPT-5 models (Responses API `text.verbosity`)."
+    },
+    "native_rlm": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/NativeRlmToml"
+        }
+      ],
+      "default": null,
+      "description": "Native RLM tuning knobs and enablement."
     },
     "notice": {
       "allOf": [

@@ -24,6 +24,26 @@ Codex can run a notification hook when the agent finishes a turn. See the config
 
 - https://developers.openai.com/codex/config-reference
 
+## Native RLM
+
+On first run, Codex writes missing `[native_rlm]` defaults into
+`~/.codex/config.toml`. Native RLM can then be configured directly there:
+
+```toml
+[native_rlm]
+enabled = true
+max_iterations = 20
+max_llm_calls = 50
+llm_batch_concurrency = 8
+max_output_chars = 100000
+exec_timeout_ms = 180000
+python_command = "python3"
+verbose = false
+```
+
+`CODEX_NATIVE_RLM*` environment variables are still supported and take precedence over
+config values when both are present.
+
 ## JSON Schema
 
 The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schema.json`.

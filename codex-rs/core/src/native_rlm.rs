@@ -4,6 +4,8 @@ use crate::client_common::ResponseEvent;
 use crate::client_common::tools::ToolSpec;
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::config::Config;
+use crate::config::types::NativeRlmToml;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 use crate::protocol::EventMsg;
@@ -314,6 +316,18 @@ pub(crate) struct NativeRlmSettings {
     verbose: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativeRlmEnvOverrides {
+    enabled: Option<bool>,
+    max_iterations: Option<u32>,
+    max_llm_calls: Option<u32>,
+    llm_batch_concurrency: Option<usize>,
+    max_output_chars: Option<usize>,
+    exec_timeout_ms: Option<u64>,
+    python_command: Option<String>,
+    verbose: Option<bool>,
+}
+
 impl Default for NativeRlmSettings {
     fn default() -> Self {
         Self {
@@ -330,29 +344,49 @@ impl Default for NativeRlmSettings {
 }
 
 impl NativeRlmSettings {
-    pub(crate) fn from_env() -> Self {
-        let enabled = std::env::var(NATIVE_RLM_ENABLED_ENV).ok();
-        let max_iterations = std::env::var(NATIVE_RLM_MAX_ITERATIONS_ENV).ok();
-        let max_llm_calls = std::env::var(NATIVE_RLM_MAX_LLM_CALLS_ENV).ok();
-        let llm_batch_concurrency = std::env::var(NATIVE_RLM_LLM_BATCH_CONCURRENCY_ENV).ok();
-        let max_output_chars = std::env::var(NATIVE_RLM_MAX_OUTPUT_CHARS_ENV).ok();
-        let exec_timeout_ms = std::env::var(NATIVE_RLM_EXEC_TIMEOUT_MS_ENV).ok();
-        let python_command = std::env::var(NATIVE_RLM_PYTHON_COMMAND_ENV).ok();
-        let verbose = std::env::var(NATIVE_RLM_VERBOSE_ENV).ok();
+    pub(crate) fn from_config(config: &Config) -> Self {
+        let mut settings = Self::from_config_values(Some(&config.native_rlm));
+        settings.apply_env_overrides(NativeRlmEnvOverrides::from_env());
+        settings
+    }
 
-        Self::from_raw_values(
-            enabled.as_deref(),
-            max_iterations.as_deref(),
-            max_llm_calls.as_deref(),
-            llm_batch_concurrency.as_deref(),
-            max_output_chars.as_deref(),
-            exec_timeout_ms.as_deref(),
-            python_command.as_deref(),
-            verbose.as_deref(),
-        )
+    fn from_config_values(native_rlm: Option<&NativeRlmToml>) -> Self {
+        let command = native_rlm
+            .and_then(|cfg| cfg.python_command.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_PYTHON_COMMAND)
+            .to_string();
+
+        Self {
+            enabled: native_rlm.and_then(|cfg| cfg.enabled).unwrap_or(false),
+            max_iterations: native_rlm
+                .and_then(|cfg| cfg.max_iterations)
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_MAX_ITERATIONS),
+            max_llm_calls: native_rlm
+                .and_then(|cfg| cfg.max_llm_calls)
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_MAX_LLM_CALLS),
+            llm_batch_concurrency: native_rlm
+                .and_then(|cfg| cfg.llm_batch_concurrency)
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_LLM_BATCH_CONCURRENCY),
+            max_output_chars: native_rlm
+                .and_then(|cfg| cfg.max_output_chars)
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_MAX_OUTPUT_CHARS),
+            exec_timeout_ms: native_rlm
+                .and_then(|cfg| cfg.exec_timeout_ms)
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_EXEC_TIMEOUT_MS),
+            python_command: command,
+            verbose: native_rlm.and_then(|cfg| cfg.verbose).unwrap_or(false),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn from_raw_values(
         enabled: Option<&str>,
         max_iterations: Option<&str>,
@@ -383,6 +417,44 @@ impl NativeRlmSettings {
         }
     }
 
+    fn apply_env_overrides(&mut self, overrides: NativeRlmEnvOverrides) {
+        let NativeRlmEnvOverrides {
+            enabled,
+            max_iterations,
+            max_llm_calls,
+            llm_batch_concurrency,
+            max_output_chars,
+            exec_timeout_ms,
+            python_command,
+            verbose,
+        } = overrides;
+
+        if let Some(enabled) = enabled {
+            self.enabled = enabled;
+        }
+        if let Some(max_iterations) = max_iterations {
+            self.max_iterations = max_iterations;
+        }
+        if let Some(max_llm_calls) = max_llm_calls {
+            self.max_llm_calls = max_llm_calls;
+        }
+        if let Some(llm_batch_concurrency) = llm_batch_concurrency {
+            self.llm_batch_concurrency = llm_batch_concurrency;
+        }
+        if let Some(max_output_chars) = max_output_chars {
+            self.max_output_chars = max_output_chars;
+        }
+        if let Some(exec_timeout_ms) = exec_timeout_ms {
+            self.exec_timeout_ms = exec_timeout_ms;
+        }
+        if let Some(python_command) = python_command {
+            self.python_command = python_command;
+        }
+        if let Some(verbose) = verbose {
+            self.verbose = verbose;
+        }
+    }
+
     pub(crate) fn enabled(&self) -> bool {
         self.enabled
     }
@@ -404,8 +476,36 @@ impl NativeRlmSettings {
     }
 }
 
-pub(crate) fn should_disable_history_truncation() -> bool {
-    NativeRlmSettings::from_env().enabled()
+impl NativeRlmEnvOverrides {
+    fn from_env() -> Self {
+        let enabled = std::env::var(NATIVE_RLM_ENABLED_ENV).ok();
+        let max_iterations = std::env::var(NATIVE_RLM_MAX_ITERATIONS_ENV).ok();
+        let max_llm_calls = std::env::var(NATIVE_RLM_MAX_LLM_CALLS_ENV).ok();
+        let llm_batch_concurrency = std::env::var(NATIVE_RLM_LLM_BATCH_CONCURRENCY_ENV).ok();
+        let max_output_chars = std::env::var(NATIVE_RLM_MAX_OUTPUT_CHARS_ENV).ok();
+        let exec_timeout_ms = std::env::var(NATIVE_RLM_EXEC_TIMEOUT_MS_ENV).ok();
+        let python_command = std::env::var(NATIVE_RLM_PYTHON_COMMAND_ENV).ok();
+        let verbose = std::env::var(NATIVE_RLM_VERBOSE_ENV).ok();
+
+        Self {
+            enabled: parse_bool(enabled.as_deref()),
+            max_iterations: parse_positive_u32(max_iterations.as_deref()),
+            max_llm_calls: parse_positive_u32(max_llm_calls.as_deref()),
+            llm_batch_concurrency: parse_positive_usize(llm_batch_concurrency.as_deref()),
+            max_output_chars: parse_positive_usize(max_output_chars.as_deref()),
+            exec_timeout_ms: parse_positive_u64(exec_timeout_ms.as_deref()),
+            python_command: python_command
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            verbose: parse_bool(verbose.as_deref()),
+        }
+    }
+}
+
+pub(crate) fn should_disable_history_truncation(config: &Config) -> bool {
+    NativeRlmSettings::from_config(config).enabled()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1562,7 +1662,7 @@ pub(crate) async fn maybe_run_turn(
     turn_metadata_header: Option<&str>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
-    let settings = NativeRlmSettings::from_env();
+    let settings = NativeRlmSettings::from_config(turn_context.config.as_ref());
     if !settings.enabled() {
         return Ok(None);
     }
@@ -2887,6 +2987,7 @@ fn last_assistant_message(items: &[ResponseItem]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_config;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -2906,6 +3007,86 @@ mod tests {
                 verbose: false,
             }
         );
+    }
+
+    #[test]
+    fn native_rlm_settings_from_config_values() {
+        let settings = NativeRlmSettings::from_config_values(Some(&NativeRlmToml {
+            enabled: Some(true),
+            max_iterations: Some(8),
+            max_llm_calls: Some(9),
+            llm_batch_concurrency: Some(3),
+            max_output_chars: Some(1234),
+            exec_timeout_ms: Some(4567),
+            python_command: Some("python3 -X dev".to_string()),
+            verbose: Some(true),
+        }));
+        assert_eq!(
+            settings,
+            NativeRlmSettings {
+                enabled: true,
+                max_iterations: 8,
+                max_llm_calls: 9,
+                llm_batch_concurrency: 3,
+                max_output_chars: 1234,
+                exec_timeout_ms: 4567,
+                python_command: "python3 -X dev".to_string(),
+                verbose: true,
+            }
+        );
+    }
+
+    #[test]
+    fn native_rlm_settings_apply_env_overrides_changes_only_overridden_fields() {
+        let mut settings = NativeRlmSettings::from_config_values(Some(&NativeRlmToml {
+            enabled: Some(true),
+            max_iterations: Some(8),
+            max_llm_calls: Some(9),
+            llm_batch_concurrency: Some(3),
+            max_output_chars: Some(1234),
+            exec_timeout_ms: Some(4567),
+            python_command: Some("python3".to_string()),
+            verbose: Some(false),
+        }));
+
+        settings.apply_env_overrides(NativeRlmEnvOverrides {
+            enabled: Some(false),
+            max_iterations: None,
+            max_llm_calls: Some(99),
+            llm_batch_concurrency: None,
+            max_output_chars: None,
+            exec_timeout_ms: Some(9000),
+            python_command: Some("python3 -X dev".to_string()),
+            verbose: Some(true),
+        });
+
+        assert_eq!(
+            settings,
+            NativeRlmSettings {
+                enabled: false,
+                max_iterations: 8,
+                max_llm_calls: 99,
+                llm_batch_concurrency: 3,
+                max_output_chars: 1234,
+                exec_timeout_ms: 9000,
+                python_command: "python3 -X dev".to_string(),
+                verbose: true,
+            }
+        );
+    }
+
+    #[test]
+    fn should_disable_history_truncation_uses_config_settings() {
+        let mut config = test_config();
+        config.native_rlm = NativeRlmToml {
+            enabled: Some(true),
+            ..NativeRlmToml::default()
+        };
+
+        assert!(should_disable_history_truncation(&config));
+
+        config.native_rlm.enabled = Some(false);
+        assert!(!should_disable_history_truncation(&config));
     }
 
     #[test]

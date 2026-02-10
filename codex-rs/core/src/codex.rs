@@ -2047,7 +2047,8 @@ impl Session {
         rollout_items: &[RolloutItem],
     ) -> Vec<ResponseItem> {
         let mut history = ContextManager::new();
-        let disable_history_truncation = native_rlm_disable_history_truncation();
+        let disable_history_truncation =
+            native_rlm_disable_history_truncation(turn_context.config.as_ref());
         for item in rollout_items {
             match item {
                 RolloutItem::ResponseItem(response_item) => {
@@ -2098,7 +2099,7 @@ impl Session {
         turn_context: &TurnContext,
     ) {
         let mut state = self.state.lock().await;
-        if native_rlm_disable_history_truncation() {
+        if native_rlm_disable_history_truncation(turn_context.config.as_ref()) {
             state.record_items_untruncated(items.iter());
         } else {
             state.record_items(items.iter(), turn_context.truncation_policy);

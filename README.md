@@ -27,6 +27,26 @@ cargo build -p codex-cli
 
 If you want the full setup (toolchain, dependencies, and packaging details), see [`docs/install.md`](./docs/install.md).
 
+### Native RLM settings (no env vars required)
+
+On first run, Codex writes missing `[native_rlm]` defaults into `~/.codex/config.toml`.
+You can then tweak Native RLM directly there:
+
+```toml
+[native_rlm]
+enabled = true
+max_iterations = 20
+max_llm_calls = 50
+llm_batch_concurrency = 8
+max_output_chars = 100000
+exec_timeout_ms = 180000
+python_command = "python3"
+verbose = true
+```
+
+Environment variables (`CODEX_NATIVE_RLM*`) are still supported and will override
+config values when set.
+
 ---
 
 ## Quickstart

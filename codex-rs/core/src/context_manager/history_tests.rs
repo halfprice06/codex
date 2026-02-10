@@ -69,6 +69,13 @@ fn custom_tool_call_output(call_id: &str, output: &str) -> ResponseItem {
     }
 }
 
+fn function_call_output(call_id: &str, output: &str) -> ResponseItem {
+    ResponseItem::FunctionCallOutput {
+        call_id: call_id.to_string(),
+        output: FunctionCallOutputPayload::from_text(output.to_string()),
+    }
+}
+
 fn reasoning_msg(text: &str) -> ResponseItem {
     ResponseItem::Reasoning {
         id: String::new(),

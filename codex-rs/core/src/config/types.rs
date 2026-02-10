@@ -378,6 +378,43 @@ pub struct AppsConfigToml {
     pub apps: HashMap<String, AppConfig>,
 }
 
+/// Native RLM settings loaded from config.toml.
+///
+/// These values match the existing `CODEX_NATIVE_RLM*` environment controls so users can
+/// configure Native RLM directly in config instead of only via process env vars.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct NativeRlmToml {
+    /// Enables Native RLM mode for agent turns.
+    pub enabled: Option<bool>,
+
+    /// Maximum number of native-RLM action iterations per turn.
+    #[schemars(range(min = 1))]
+    pub max_iterations: Option<u32>,
+
+    /// Maximum number of sub-LLM calls native-RLM may issue per turn.
+    #[schemars(range(min = 1))]
+    pub max_llm_calls: Option<u32>,
+
+    /// Parallel sub-LLM calls allowed in a batch.
+    #[schemars(range(min = 1))]
+    pub llm_batch_concurrency: Option<usize>,
+
+    /// Maximum characters captured from tool/stdout output per step.
+    #[schemars(range(min = 1))]
+    pub max_output_chars: Option<usize>,
+
+    /// Timeout for each exec/tool call in milliseconds.
+    #[schemars(range(min = 1))]
+    pub exec_timeout_ms: Option<u64>,
+
+    /// Interpreter command used for the native-RLM Python REPL.
+    pub python_command: Option<String>,
+
+    /// Enables verbose native-RLM trajectory logging.
+    pub verbose: Option<bool>,
+}
+
 // ===== OTEL configuration =====
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]

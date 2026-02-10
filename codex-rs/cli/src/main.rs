@@ -3,6 +3,9 @@ use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
+use codex_app_server_protocol::ConfigBatchWriteParams;
+use codex_app_server_protocol::ConfigEdit as ApiConfigEdit;
+use codex_app_server_protocol::MergeStrategy;
 use codex_arg0::arg0_dispatch_or_else;
 use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
@@ -27,9 +30,20 @@ use codex_tui::Cli as TuiCli;
 use codex_tui::ExitReason;
 use codex_tui::update_action::UpdateAction;
 use owo_colors::OwoColorize;
+use std::io::ErrorKind;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use supports_color::Stream;
+use toml::Value as TomlValue;
+
+const DEFAULT_NATIVE_RLM_ENABLED: bool = true;
+const DEFAULT_NATIVE_RLM_MAX_ITERATIONS: u32 = 20;
+const DEFAULT_NATIVE_RLM_MAX_LLM_CALLS: u32 = 50;
+const DEFAULT_NATIVE_RLM_LLM_BATCH_CONCURRENCY: usize = 8;
+const DEFAULT_NATIVE_RLM_MAX_OUTPUT_CHARS: usize = 100_000;
+const DEFAULT_NATIVE_RLM_EXEC_TIMEOUT_MS: u64 = 180_000;
+const DEFAULT_NATIVE_RLM_PYTHON_COMMAND: &str = "python3";
+const DEFAULT_NATIVE_RLM_VERBOSE: bool = false;
 
 #[cfg(target_os = "macos")]
 mod app_cmd;
@@ -43,6 +57,7 @@ use crate::mcp_cmd::McpCli;
 
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
+use codex_core::config::ConfigService;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::find_codex_home;
 use codex_core::features::Stage;
@@ -557,6 +572,12 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
         subcommand,
     } = MultitoolCli::parse();
 
+    if !matches!(subcommand, Some(Subcommand::Completion(_)))
+        && let Err(err) = ensure_native_rlm_defaults_in_user_config().await
+    {
+        eprintln!("Warning: failed to bootstrap native RLM defaults: {err}");
+    }
+
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
     root_config_overrides.raw_overrides.extend(toggle_overrides);
@@ -874,6 +895,92 @@ fn maybe_print_under_development_feature_warning(
     );
 }
 
+async fn ensure_native_rlm_defaults_in_user_config() -> anyhow::Result<()> {
+    let codex_home = find_codex_home()?;
+    let config_path = codex_home.join(codex_core::config::CONFIG_TOML_FILE);
+    let config_value = load_user_config_toml(&config_path)?;
+    let edits = native_rlm_bootstrap_edits(&config_value);
+
+    if edits.is_empty() {
+        return Ok(());
+    }
+
+    ConfigService::new_with_defaults(codex_home)
+        .batch_write(ConfigBatchWriteParams {
+            edits,
+            file_path: None,
+            expected_version: None,
+        })
+        .await?;
+
+    Ok(())
+}
+
+fn load_user_config_toml(config_path: &std::path::Path) -> anyhow::Result<TomlValue> {
+    let contents = match std::fs::read_to_string(config_path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+
+    if contents.trim().is_empty() {
+        return Ok(TomlValue::Table(Default::default()));
+    }
+
+    Ok(toml::from_str(&contents)?)
+}
+
+fn native_rlm_bootstrap_edits(config: &TomlValue) -> Vec<ApiConfigEdit> {
+    let native_rlm = config.get("native_rlm").and_then(TomlValue::as_table);
+    let has_key = |key: &str| native_rlm.and_then(|table| table.get(key)).is_some();
+
+    let mut edits = Vec::new();
+    let mut push_if_missing = |key: &str, value: serde_json::Value| {
+        if !has_key(key) {
+            edits.push(ApiConfigEdit {
+                key_path: format!("native_rlm.{key}"),
+                value,
+                merge_strategy: MergeStrategy::Replace,
+            });
+        }
+    };
+
+    push_if_missing(
+        "enabled",
+        serde_json::Value::from(DEFAULT_NATIVE_RLM_ENABLED),
+    );
+    push_if_missing(
+        "max_iterations",
+        serde_json::Value::from(DEFAULT_NATIVE_RLM_MAX_ITERATIONS),
+    );
+    push_if_missing(
+        "max_llm_calls",
+        serde_json::Value::from(DEFAULT_NATIVE_RLM_MAX_LLM_CALLS),
+    );
+    push_if_missing(
+        "llm_batch_concurrency",
+        serde_json::Value::from(DEFAULT_NATIVE_RLM_LLM_BATCH_CONCURRENCY as u64),
+    );
+    push_if_missing(
+        "max_output_chars",
+        serde_json::Value::from(DEFAULT_NATIVE_RLM_MAX_OUTPUT_CHARS as u64),
+    );
+    push_if_missing(
+        "exec_timeout_ms",
+        serde_json::Value::from(DEFAULT_NATIVE_RLM_EXEC_TIMEOUT_MS),
+    );
+    push_if_missing(
+        "python_command",
+        serde_json::Value::from(DEFAULT_NATIVE_RLM_PYTHON_COMMAND),
+    );
+    push_if_missing(
+        "verbose",
+        serde_json::Value::from(DEFAULT_NATIVE_RLM_VERBOSE),
+    );
+
+    edits
+}
+
 /// Prepend root-level overrides so they have lower precedence than
 /// CLI-specific ones specified after the subcommand (if any).
 fn prepend_config_flags(
@@ -1130,6 +1237,73 @@ mod tests {
             update_action: None,
             exit_reason: ExitReason::UserRequested,
         }
+    }
+
+    #[test]
+    fn native_rlm_bootstrap_edits_add_all_defaults_when_missing() {
+        let config = TomlValue::Table(Default::default());
+        let edits = native_rlm_bootstrap_edits(&config);
+        let paths: Vec<&str> = edits.iter().map(|edit| edit.key_path.as_str()).collect();
+
+        assert_eq!(
+            paths,
+            vec![
+                "native_rlm.enabled",
+                "native_rlm.max_iterations",
+                "native_rlm.max_llm_calls",
+                "native_rlm.llm_batch_concurrency",
+                "native_rlm.max_output_chars",
+                "native_rlm.exec_timeout_ms",
+                "native_rlm.python_command",
+                "native_rlm.verbose",
+            ]
+        );
+    }
+
+    #[test]
+    fn native_rlm_bootstrap_edits_only_add_missing_keys() {
+        let config: TomlValue = toml::from_str(
+            r#"
+            [native_rlm]
+            enabled = true
+            max_llm_calls = 99
+            "#,
+        )
+        .expect("parse config");
+        let edits = native_rlm_bootstrap_edits(&config);
+        let paths: Vec<&str> = edits.iter().map(|edit| edit.key_path.as_str()).collect();
+
+        assert_eq!(
+            paths,
+            vec![
+                "native_rlm.max_iterations",
+                "native_rlm.llm_batch_concurrency",
+                "native_rlm.max_output_chars",
+                "native_rlm.exec_timeout_ms",
+                "native_rlm.python_command",
+                "native_rlm.verbose",
+            ]
+        );
+    }
+
+    #[test]
+    fn native_rlm_bootstrap_edits_skip_when_all_keys_present() {
+        let config: TomlValue = toml::from_str(
+            r#"
+            [native_rlm]
+            enabled = false
+            max_iterations = 20
+            max_llm_calls = 50
+            llm_batch_concurrency = 8
+            max_output_chars = 100000
+            exec_timeout_ms = 180000
+            python_command = "python3"
+            verbose = false
+            "#,
+        )
+        .expect("parse config");
+
+        assert_eq!(native_rlm_bootstrap_edits(&config), Vec::new());
     }
 
     #[test]
