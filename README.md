@@ -25,6 +25,17 @@ cargo build -p codex-cli
 ./target/debug/codex
 ```
 
+If you want a dedicated command name for this fork, add a shell alias:
+
+```shell
+# from codex-rs/ inside this repo
+echo "alias codexrlm='$(pwd)/target/debug/codex'" >> ~/.zshrc
+source ~/.zshrc
+
+# now run your fork build with:
+codexrlm
+```
+
 If you want the full setup (toolchain, dependencies, and packaging details), see [`docs/install.md`](./docs/install.md).
 
 ### Native RLM settings (no env vars required)
@@ -46,6 +57,12 @@ verbose = true
 
 Environment variables (`CODEX_NATIVE_RLM*`) are still supported and will override
 config values when set.
+
+### Current approvals requirement
+
+At the moment, Native RLM workflows expect full tool/file access. In the Codex TUI,
+run `/approvals` and choose full access before testing RLM loops. If approvals are
+stricter, tool execution and file editing may fail mid-loop.
 
 ---
 
