@@ -43,7 +43,7 @@ const DEFAULT_NATIVE_RLM_LLM_BATCH_CONCURRENCY: usize = 8;
 const DEFAULT_NATIVE_RLM_MAX_OUTPUT_CHARS: usize = 10_000;
 const DEFAULT_NATIVE_RLM_EXEC_TIMEOUT_MS: u64 = 180_000;
 const DEFAULT_NATIVE_RLM_PYTHON_COMMAND: &str = "python3";
-const DEFAULT_NATIVE_RLM_VERBOSE: bool = false;
+const DEFAULT_NATIVE_RLM_VERBOSE: bool = true;
 
 #[cfg(target_os = "macos")]
 mod app_cmd;
@@ -1298,7 +1298,7 @@ mod tests {
             max_output_chars = 10000
             exec_timeout_ms = 180000
             python_command = "python3"
-            verbose = false
+            verbose = true
             "#,
         )
         .expect("parse config");

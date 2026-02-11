@@ -38,7 +38,7 @@ llm_batch_concurrency = 8
 max_output_chars = 10000
 exec_timeout_ms = 180000
 python_command = "python3"
-verbose = false
+verbose = true
 ```
 
 `CODEX_NATIVE_RLM*` environment variables are still supported and take precedence over
