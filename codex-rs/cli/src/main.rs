@@ -40,7 +40,7 @@ const DEFAULT_NATIVE_RLM_ENABLED: bool = true;
 const DEFAULT_NATIVE_RLM_MAX_ITERATIONS: u32 = 20;
 const DEFAULT_NATIVE_RLM_MAX_LLM_CALLS: u32 = 50;
 const DEFAULT_NATIVE_RLM_LLM_BATCH_CONCURRENCY: usize = 8;
-const DEFAULT_NATIVE_RLM_MAX_OUTPUT_CHARS: usize = 100_000;
+const DEFAULT_NATIVE_RLM_MAX_OUTPUT_CHARS: usize = 10_000;
 const DEFAULT_NATIVE_RLM_EXEC_TIMEOUT_MS: u64 = 180_000;
 const DEFAULT_NATIVE_RLM_PYTHON_COMMAND: &str = "python3";
 const DEFAULT_NATIVE_RLM_VERBOSE: bool = false;
@@ -1295,7 +1295,7 @@ mod tests {
             max_iterations = 20
             max_llm_calls = 50
             llm_batch_concurrency = 8
-            max_output_chars = 100000
+            max_output_chars = 10000
             exec_timeout_ms = 180000
             python_command = "python3"
             verbose = false

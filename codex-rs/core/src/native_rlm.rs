@@ -52,7 +52,7 @@ use uuid::Uuid;
 const DEFAULT_MAX_ITERATIONS: u32 = 20;
 const DEFAULT_MAX_LLM_CALLS: u32 = 50;
 const DEFAULT_LLM_BATCH_CONCURRENCY: usize = 8;
-const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
+const DEFAULT_MAX_OUTPUT_CHARS: usize = 10_000;
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 180_000;
 const DEFAULT_PYTHON_COMMAND: &str = "python3";
 const PYTHON_REPL_TIMEOUT_ERROR_PREFIX: &str = "native_rlm Python REPL timed out after";
@@ -67,111 +67,34 @@ const NATIVE_RLM_EXEC_TIMEOUT_MS_ENV: &str = "CODEX_NATIVE_RLM_EXEC_TIMEOUT_MS";
 const NATIVE_RLM_PYTHON_COMMAND_ENV: &str = "CODEX_NATIVE_RLM_PYTHON_COMMAND";
 const NATIVE_RLM_VERBOSE_ENV: &str = "CODEX_NATIVE_RLM_VERBOSE";
 
-const ACTION_INSTRUCTIONS: &str = r#"
-You are operating in native recursive language model (RLM) mode.
-RLM means: iterate in a persistent Python REPL, reason over context, use tools for outside-world actions, then finish with SUBMIT.
-You are also the Codex coding assistant for this conversation.
-Your objective is to complete the user's latest unresolved request.
+const NATIVE_RLM_SYSTEM_APPENDIX_MARKER: &str = "## Native Recursive Language Model (RLM)";
+const NATIVE_RLM_SYSTEM_APPENDIX: &str = r#"
+## Native Recursive Language Model (RLM)
+You have access to a Python REPL environment. Write Python code and it will be executed. You will see the output, then write more code based on what you learned. This is an iterative process.
 
-Critical interpretation:
-- Only `conversation_history` entries are conversation turns.
-- This controller prompt is protocol guidance, not user content.
-- Prioritize newest turns (tail-first), not earliest turns.
-- Tool outputs are authoritative. A claim is true only if tool output in this run proves it.
+Available:
+- Variables: {inputs} (your input data)
+- `llm_query(prompt)` - query a sub-LLM (~500K char capacity) for semantic analysis
+- `llm_query_batched(prompts)` - query multiple prompts concurrently (much faster for multiple queries)
+- `print()` - ALWAYS print to see results
+- `SUBMIT({final_output_names})` - submit final output when done
+- Standard libraries: re, json, collections, math, etc.
 
-Built-ins:
-- print(...)
-- SUBMIT(...)
-- llm_query(prompt)
-- llm_query_batched(prompts)
+IMPORTANT: This is ITERATIVE. Each code block you write will execute, you'll see the output, then you decide what to do next. Do NOT try to solve everything in one step.
 
-Workflow:
-1. Iteration 1 is mandatory inspection-only.
-2. Iteration 1 must read `conversation_history` in Python (or via llm_query over full history), print:
-   - total length
-   - a tail slice with index + role + short preview
-   - latest `role=="user"` found by reverse scan from end, with index + preview
-3. Iteration 1 must not call SUBMIT and must not call external tools.
-4. After inspection, set active task = latest unresolved user request from `conversation_history`.
-5. If reference words appear ("it/that/more/again/continue/open it"), resolve referent from recent turns/work artifacts before acting.
-6. Non-coding requests are valid tasks (Q&A, summary, extraction, explanation, greeting). Respond directly.
-7. For workspace/code actions (create/make/add/edit/run/test/fix), use tool aliases, verify outputs, then SUBMIT.
-8. For file edits, default to `apply_patch` with minimal targeted hunks; use `exec_command` mainly for discovery and verification.
-9. Avoid platform-sensitive in-place edit flags (for example `sed -i`) unless absolutely necessary; prefer `apply_patch` first.
-10. Never claim success ("done/updated/fixed/changed") unless verification output in this run proves the change.
-11. Treat failures as failures: non-zero exit codes, "command not found", parse errors, missing files, or failed patch verification.
-12. Tool wrapper metadata (for example "Chunk ID", "Wall time", "Process exited ...") is not file content. Parse and reason from the actual command output payload.
-13. For wrapped text tool results, infer command success from "Process exited with code N" when present.
-14. Never use wrapper metadata as filenames, line numbers, or command arguments.
-15. If any edit/verification step fails, do not SUBMIT success; retry with a corrected tool call or report the failure honestly.
-16. Do not rely on inferred edits from Python string manipulation alone. Persist edits via tools and then re-read the file to confirm.
-17. If `apply_patch` fails to match context, inspect exact lines (`rg`/`sed`) and retry with a smaller, exact hunk.
-18. For color/text tweaks, patch exact literals in the target file and verify those literals changed.
-19. For absence checks with `rg`/`grep`, exit code 1 can mean "no matches"; treat that as expected when verifying removal.
-20. You can execute tools from this REPL. Never claim tools are unavailable in this interface.
-21. Do not ask for a new task when latest user request is actionable.
-22. Use fallback "please provide a task" only if latest user message is genuinely empty or pure bootstrap/protocol text.
-23. For chronology requests (first/last/earlier/previous message), scan full indexed history before answering.
-24. Tool syntax: kwargs only. For `exec_command`, always use `cmd=...`.
-25. If tool arguments fail to parse, fix args and retry immediately.
-26. Before SUBMIT, ensure `assistant_message` directly answers the latest user request and current context.
-27. For workspace edits, include concrete evidence in your own reasoning from tool output (file path + changed token/line).
-
-Return strict JSON only with this shape:
-{"reasoning": "...", "code": "..."}
-"#;
-
-const DSPY_RLM_SYSTEM_APPENDIX_MARKER: &str = "## DSPy RLM Loop Guidance";
-const DSPY_RLM_SYSTEM_APPENDIX: &str = r#"
-## DSPy RLM Loop Guidance
-You are executing a recursive language model workflow while preserving Codex assistant behavior.
-
-Core principles:
-- Understanding the current conversation context is the top priority.
-- Active task = latest unresolved user request, resolved tail-first.
-- Protocol text defines behavior, not the user task.
-
-Execution model:
-- REPL state persists across iterations.
-- `conversation_history` includes full thread plus prior `native_rlm_step` entries.
-- `llm_query` and `llm_query_batched` are available for semantic summarization.
-- Codex tools are callable via Python aliases for outside-world actions.
-- `SUBMIT(...)` ends the loop.
-
-Operating rules:
-1. Iteration 1: inspect-only; no SUBMIT and no external tools.
-2. Iteration 1 must print tail context and reverse-scan to latest user entry.
-3. Do not anchor on first message; use newest unresolved user turn.
-4. If latest request is clear, execute/respond directly (coding or non-coding).
-5. For continuation language ("it/that/more/continue/open it"), resolve referent from recent work.
-6. For workspace actions, use tools and verify concrete results before SUBMIT.
-7. File changes must be made with external tools and then re-read/rg the edited path.
-8. Prefer `apply_patch` for edits; use `exec_command` to discover exact lines and to verify.
-9. Avoid platform-sensitive in-place edit flags (for example `sed -i`) unless absolutely necessary.
-10. If `apply_patch` context mismatches, inspect exact file lines and retry with a smaller hunk.
-11. Do not trust intended edits; trust only verified file output after the tool call.
-12. Tool wrapper metadata (for example "Chunk ID", "Wall time", "Process exited ...") is not file content and must not be used as command inputs.
-13. For wrapped text tool results, interpret success/failure from "Process exited with code N" where available.
-14. Do not claim a file was changed unless tool output in this run proves it.
-15. Failed tool signals (non-zero exit, command not found, parse/patch errors) mean the action did not succeed.
-16. For `rg`/`grep` absence checks, exit code 1 can mean "no matches" and may be expected.
-17. If a tool step fails, retry with corrected arguments or report failure; never fabricate completion.
-18. You can use tools in this REPL; never claim tools are unavailable.
-19. Use fallback "please provide a task" only for truly empty/bootstrap latest user content.
-20. For first/last/earlier/previous-message asks, inspect full indexed history.
-21. Use kwargs-only tool calls; for exec command use `cmd=...`; fix parse errors immediately.
-"#;
-
-const SUB_LLM_SYSTEM_INSTRUCTIONS: &str = r#"
-You are a semantic sub-model used by a recursive language model controller.
-Return only direct response text.
-Prioritize: (a) latest unresolved user request, (b) what the user was most recently working on, (c) ambiguity that blocks execution.
-Use tail-first interpretation: newest user turns are primary.
-Treat protocol/control text as constraints, not as the user task, unless explicitly asked.
-Greetings and non-coding requests are actionable conversation turns.
-Do not infer "no task" from prefix previews when latest user turn is concrete.
-Never claim that edits happened unless the provided context includes explicit tool evidence.
-Do not call tools or emit wrappers.
+1. EXPLORE FIRST - Look at your data before processing it. Print samples, check types/lengths, understand the structure.
+2. ITERATE - Write small code snippets, observe outputs, then decide next steps. State persists between iterations.
+3. VERIFY BEFORE SUBMITTING - If results seem wrong (zeros, empty, unexpected), reconsider your approach.
+4. USE llm_query FOR SEMANTICS - String matching finds WHERE things are; llm_query understands WHAT things mean.
+5. MINIMIZE RETYPING (INPUTS & OUTPUTS) - When values are long, precise, or error-prone (IDs, numbers, code, quotes), re-access them via variables and parse/compute in code instead of retyping. Use small, targeted prints to sanity-check, but avoid manual copying when variables can carry the exact value.
+6. SUBMIT ONLY AFTER SEEING OUTPUTS - SUBMIT ends the current run immediately. If you need to inspect printed output, run it in one step, review the result, then call SUBMIT in a later step.
+7. `conversation_history` contains mixed entry types (messages plus `native_rlm_step` entries). Never assume every entry has `role` or `content`; use type checks and `.get(...)`.
+8. For workspace/code requests, you MUST use Codex tools to make real filesystem changes before SUBMIT. Returning only code snippets in `assistant_message` is not completion.
+9. For `exec_command`, always pass `cmd=...` and use an explicit `workdir=...` when touching files.
+10. For bug fixes, run symptom-specific verification before SUBMIT and print evidence (for example, grep for the bad token, grep for the expected token, run compile/test command).
+11. If a tool call fails (argument parse error, non-zero exit, apply_patch verification failure), do not claim success. Retry with corrected commands and verify again.
+12. Never claim a file was changed unless tool output from this run shows the expected token/path changes.
+13. Python code blocks must be executable Python only. Put prose in `assistant_message` strings, never as bare code.
 "#;
 
 const EXTRACT_INSTRUCTIONS: &str = r#"
@@ -937,33 +860,14 @@ impl<'a> NativeRlmRunner<'a> {
 
         let mut repl = PythonRepl::start(&self.settings, &self.tool_catalog.aliases).await?;
         let mut history: Vec<ReplEntry> = Vec::new();
-        let mut initial_history_inspection_completed = false;
 
         for iteration in 0..self.settings.max_iterations {
             let (variables, variable_infos) =
                 self.build_iteration_variables(history.as_slice()).await?;
-            let conversation_history = variables
-                .get("conversation_history")
-                .cloned()
-                .unwrap_or(Value::Null);
-            let latest_user_message = latest_user_message_text(&conversation_history);
-            let conversation_tail = conversation_tail_summary(&conversation_history, 8, 180);
-            let likely_workspace_request = latest_user_message
-                .as_deref()
-                .map(is_likely_workspace_edit_request)
-                .unwrap_or(false);
             let action = self
-                .generate_action(
-                    &variable_infos,
-                    &history,
-                    iteration,
-                    latest_user_message.as_deref(),
-                    &conversation_tail,
-                )
+                .generate_action(&variable_infos, &history, iteration)
                 .await?;
             let code = strip_code_fences(&action.code);
-            let code_uses_external_tools =
-                code_invokes_external_tool_alias(&code, &self.tool_catalog.aliases);
             if self.settings.verbose {
                 self.sess
                     .notify_background_event(
@@ -979,36 +883,13 @@ impl<'a> NativeRlmRunner<'a> {
                     .await;
             }
 
-            if !initial_history_inspection_completed
-                && !iteration_one_code_has_required_history_inspection(&code)
-            {
-                let guidance = "[Policy Error] Initial inspection is required before finalizing. Print `conversation_history` length/tail/latest-user preview or use `llm_query` over conversation history, then continue.";
-                history.push(ReplEntry {
-                    reasoning: action.reasoning,
-                    code,
-                    output: format_output(guidance, self.settings.max_output_chars),
-                });
-                continue;
-            }
-            if !initial_history_inspection_completed {
-                initial_history_inspection_completed = true;
-            }
-
             let result = self.execute_code(&mut repl, &code, &variables).await?;
             if self.settings.verbose {
                 self.emit_iteration_result_debug(iteration, &result).await;
             }
             let restart_repl = Self::should_restart_repl_after_result(&result);
             match self
-                .process_iteration_result(
-                    action,
-                    code,
-                    result,
-                    &latest_user_message,
-                    likely_workspace_request,
-                    code_uses_external_tools,
-                    &mut history,
-                )
+                .process_iteration_result(action, code, result, &mut history)
                 .await
             {
                 IterationOutcome::Continue => {
@@ -1050,8 +931,6 @@ impl<'a> NativeRlmRunner<'a> {
         variable_infos: &[String],
         history: &[ReplEntry],
         iteration: u32,
-        latest_user_message: Option<&str>,
-        conversation_tail: &str,
     ) -> CodexResult<ActionStep> {
         let prompt_text = render_action_prompt(
             &self.turn_context,
@@ -1062,8 +941,6 @@ impl<'a> NativeRlmRunner<'a> {
             iteration,
             self.settings.max_iterations,
             self.settings.max_llm_calls,
-            latest_user_message,
-            conversation_tail,
             &self.settings.python_command,
         );
 
@@ -1423,10 +1300,11 @@ impl<'a> NativeRlmRunner<'a> {
             &self.settings.python_command,
         );
 
+        let tool_name = binding.tool_name.clone();
         let call_id = format!("native-rlm-{}", Uuid::new_v4());
         let payload = build_tool_payload(&binding, args, kwargs)?;
         let call = ToolCall {
-            tool_name: binding.tool_name,
+            tool_name: tool_name.clone(),
             call_id,
             payload,
         };
@@ -1445,7 +1323,8 @@ impl<'a> NativeRlmRunner<'a> {
                 .await;
         }
 
-        response_input_item_to_value(response)
+        let value = response_input_item_to_value(response)?;
+        Ok(normalize_native_rlm_tool_result(&alias, &tool_name, value))
     }
 
     async fn query_model_text(
@@ -1474,9 +1353,6 @@ impl<'a> NativeRlmRunner<'a> {
         action: ActionStep,
         code: String,
         result: InterpreterResult,
-        latest_user_message: &Option<String>,
-        likely_workspace_request: bool,
-        code_uses_external_tools: bool,
         history: &mut Vec<ReplEntry>,
     ) -> IterationOutcome {
         match result {
@@ -1516,76 +1392,6 @@ impl<'a> NativeRlmRunner<'a> {
                             &final_output,
                             &self.final_output_spec,
                         );
-                        if (is_task_solicitation_message(&final_message)
-                            || is_meta_protocol_completion_message(&final_message))
-                            && should_block_task_solicitation(latest_user_message.as_deref())
-                        {
-                            let latest_preview = latest_user_message
-                                .as_deref()
-                                .map(|text| text.replace('\n', " "))
-                                .unwrap_or_default();
-                            let latest_preview =
-                                latest_preview.chars().take(220).collect::<String>();
-                            let mut policy_error = format!(
-                                "[Policy Error] Do not ask the user to provide a task when a latest user message exists. Latest user message: {latest_preview:?}. Respond directly to that message."
-                            );
-                            if self.settings.verbose && !stdout.trim().is_empty() {
-                                policy_error = format!("{stdout}\n{policy_error}");
-                            }
-                            history.push(ReplEntry {
-                                reasoning: action.reasoning,
-                                code,
-                                output: format_output(
-                                    &policy_error,
-                                    self.settings.max_output_chars,
-                                ),
-                            });
-                            return IterationOutcome::Continue;
-                        }
-                        if likely_workspace_request && !code_uses_external_tools {
-                            let latest_preview = latest_user_message
-                                .as_deref()
-                                .map(|text| text.replace('\n', " "))
-                                .unwrap_or_default();
-                            let latest_preview =
-                                latest_preview.chars().take(220).collect::<String>();
-                            let policy_error = format!(
-                                "[Policy Error] Latest user request looks like a workspace/code action ({latest_preview:?}), but this step did not use Codex tools. Use tools to perform and verify the change before SUBMIT."
-                            );
-                            history.push(ReplEntry {
-                                reasoning: action.reasoning,
-                                code,
-                                output: format_output(
-                                    &policy_error,
-                                    self.settings.max_output_chars,
-                                ),
-                            });
-                            return IterationOutcome::Continue;
-                        }
-                        if contains_unresolved_tool_wrapper_metadata(&final_message) {
-                            let policy_error = "[Policy Error] Final response still contains unresolved tool wrapper metadata (`Chunk ID`). Re-run and summarize concrete outcomes instead of returning wrapper text.".to_string();
-                            history.push(ReplEntry {
-                                reasoning: action.reasoning,
-                                code,
-                                output: format_output(
-                                    &policy_error,
-                                    self.settings.max_output_chars,
-                                ),
-                            });
-                            return IterationOutcome::Continue;
-                        }
-                        if likely_workspace_request && workspace_execution_failed(&stdout) {
-                            let policy_error = "[Policy Error] Workspace action appears to have failed. Re-run with concrete file paths and successful command verification before SUBMIT.".to_string();
-                            history.push(ReplEntry {
-                                reasoning: action.reasoning,
-                                code,
-                                output: format_output(
-                                    &policy_error,
-                                    self.settings.max_output_chars,
-                                ),
-                            });
-                            return IterationOutcome::Continue;
-                        }
                         let mut final_output_line = format!(
                             "FINAL: {}",
                             serde_json::to_string(&Value::Object(final_output))
@@ -1842,24 +1648,22 @@ fn parse_positive_u64(raw: Option<&str>) -> Option<u64> {
 fn compose_native_rlm_base_instructions(base_instructions: &BaseInstructions) -> BaseInstructions {
     if base_instructions
         .text
-        .contains(DSPY_RLM_SYSTEM_APPENDIX_MARKER)
+        .contains(NATIVE_RLM_SYSTEM_APPENDIX_MARKER)
     {
         return base_instructions.clone();
     }
 
     let trimmed = base_instructions.text.trim_end();
     let text = if trimmed.is_empty() {
-        DSPY_RLM_SYSTEM_APPENDIX.to_string()
+        NATIVE_RLM_SYSTEM_APPENDIX.to_string()
     } else {
-        format!("{trimmed}\n\n{DSPY_RLM_SYSTEM_APPENDIX}")
+        format!("{trimmed}\n\n{NATIVE_RLM_SYSTEM_APPENDIX}")
     };
     BaseInstructions { text }
 }
 
-fn compose_sub_llm_base_instructions(_base_instructions: &BaseInstructions) -> BaseInstructions {
-    BaseInstructions {
-        text: SUB_LLM_SYSTEM_INSTRUCTIONS.to_string(),
-    }
+fn compose_sub_llm_base_instructions(base_instructions: &BaseInstructions) -> BaseInstructions {
+    base_instructions.clone()
 }
 
 fn json_type_name(value: &Value) -> &'static str {
@@ -1907,233 +1711,6 @@ fn build_variables_map(
     Ok(variables)
 }
 
-fn content_text_from_value(content: &Value) -> String {
-    match content {
-        Value::String(text) => text.trim().to_string(),
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|item| {
-                let Value::Object(map) = item else {
-                    return None;
-                };
-                ["text", "input_text", "output_text"]
-                    .iter()
-                    .find_map(|key| map.get(*key).and_then(Value::as_str))
-                    .map(str::trim)
-                    .filter(|text| !text.is_empty())
-                    .map(ToOwned::to_owned)
-            })
-            .collect::<Vec<String>>()
-            .join(" ")
-            .trim()
-            .to_string(),
-        _ => String::new(),
-    }
-}
-
-fn latest_user_message_text(conversation_history: &Value) -> Option<String> {
-    let Value::Array(entries) = conversation_history else {
-        return None;
-    };
-
-    entries.iter().rev().find_map(|entry| {
-        let Value::Object(map) = entry else {
-            return None;
-        };
-        if map.get("role").and_then(Value::as_str) != Some("user") {
-            return None;
-        }
-        map.get("content")
-            .map(content_text_from_value)
-            .map(|text| text.trim().to_string())
-            .filter(|text| !text.is_empty())
-    })
-}
-
-fn conversation_tail_summary(
-    conversation_history: &Value,
-    max_entries: usize,
-    preview_chars: usize,
-) -> String {
-    let Value::Array(entries) = conversation_history else {
-        return String::new();
-    };
-
-    let start = entries.len().saturating_sub(max_entries);
-    entries
-        .iter()
-        .enumerate()
-        .skip(start)
-        .map(|(index, entry)| {
-            let Value::Object(map) = entry else {
-                return format!("[{index}] non-object entry");
-            };
-            let role = map.get("role").and_then(Value::as_str).unwrap_or("none");
-            let text = map
-                .get("content")
-                .map(content_text_from_value)
-                .unwrap_or_default();
-            let preview = text
-                .chars()
-                .take(preview_chars)
-                .collect::<String>()
-                .replace('\n', " ");
-            format!("[{index}] role={role} text={preview:?}")
-        })
-        .collect::<Vec<String>>()
-        .join("\n")
-}
-
-fn iteration_one_code_has_required_history_inspection(code: &str) -> bool {
-    let lowercase = code.to_ascii_lowercase();
-    let references_history = lowercase.contains("conversation_history");
-    let has_observable_inspection = lowercase.contains("print(")
-        || lowercase.contains("pprint(")
-        || lowercase.contains("llm_query(")
-        || lowercase.contains("llm_query_batched(");
-    references_history && has_observable_inspection
-}
-
-fn is_task_solicitation_message(message: &str) -> bool {
-    let lowercase = message.to_ascii_lowercase();
-    let direct_match = [
-        "please provide a task",
-        "provide the specific task",
-        "provide a specific task",
-        "share the concrete task",
-        "please provide the concrete task",
-        "please restate the specific task",
-        "please restate the task",
-        "restate the specific task",
-        "specify the task",
-        "share the specific task",
-        "state the specific task",
-        "what task",
-        "proceed immediately",
-    ]
-    .iter()
-    .any(|needle| lowercase.contains(needle));
-    if direct_match {
-        return true;
-    }
-
-    let mentions_task = lowercase.contains("task");
-    let asks_for_task = ["provide", "restate", "share", "specify", "state", "what"]
-        .iter()
-        .any(|needle| lowercase.contains(needle));
-    (mentions_task && asks_for_task) || lowercase.contains("you want me to complete")
-}
-
-fn should_block_task_solicitation(latest_user_message: Option<&str>) -> bool {
-    let Some(text) = latest_user_message
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-    else {
-        return false;
-    };
-
-    let lowercase = text.to_ascii_lowercase();
-    !lowercase.starts_with("<environment_context>")
-        && !lowercase.starts_with("<collaboration_mode>")
-        && !lowercase.starts_with("# agents.md instructions")
-        && !lowercase.starts_with("<instructions>")
-}
-
-fn is_likely_workspace_edit_request(text: &str) -> bool {
-    let lowercase = text.to_ascii_lowercase();
-    let has_action_verb = [
-        "create",
-        "make",
-        "add",
-        "edit",
-        "update",
-        "modify",
-        "fix",
-        "run",
-        "test",
-        "open",
-        "implement",
-        "improve",
-        "feature",
-    ]
-    .iter()
-    .any(|needle| lowercase.contains(needle));
-    let references_workspace = [
-        "file",
-        "folder",
-        "directory",
-        "repo",
-        "code",
-        "project",
-        "app",
-        "game",
-        "website",
-        "html",
-        "javascript",
-        "python",
-        "rust",
-        "it",
-        "this",
-        "that",
-        "thing",
-        "@",
-    ]
-    .iter()
-    .any(|needle| lowercase.contains(needle));
-    has_action_verb && references_workspace
-}
-
-fn code_invokes_external_tool_alias(code: &str, aliases: &[String]) -> bool {
-    aliases
-        .iter()
-        .filter(|alias| alias.as_str() != "llm_query" && alias.as_str() != "llm_query_batched")
-        .map(|alias| format!("{alias}("))
-        .any(|pattern| code.contains(&pattern))
-}
-
-fn is_meta_protocol_completion_message(message: &str) -> bool {
-    let lowercase = message.to_ascii_lowercase();
-    [
-        "processed your rlm",
-        "rlm-mode instruction",
-        "protocol-compliant rlm execution",
-        "inspected conversation history",
-        "identified the latest user request",
-        "identified your latest request",
-        "completed the required submit step",
-        "required submission field",
-        "returned the required submission",
-        "strict json output",
-        "native rlm mode",
-    ]
-    .iter()
-    .any(|needle| lowercase.contains(needle))
-}
-
-fn workspace_execution_failed(stdout: &str) -> bool {
-    let lowercase = stdout.to_ascii_lowercase();
-    if lowercase.contains("no such file or directory")
-        || lowercase.contains("can't open")
-        || lowercase.contains("command not found")
-    {
-        return true;
-    }
-
-    stdout.lines().any(|line| {
-        let trimmed = line.trim();
-        if let Some(code_text) = trimmed.strip_prefix("Process exited with code ")
-            && let Ok(code) = code_text.trim().parse::<i32>()
-        {
-            return code != 0;
-        }
-        false
-    })
-}
-
-fn contains_unresolved_tool_wrapper_metadata(text: &str) -> bool {
-    text.contains("Chunk ID:")
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_action_prompt(
     turn_context: &TurnContext,
@@ -2144,12 +1721,9 @@ fn render_action_prompt(
     iteration: u32,
     max_iterations: u32,
     max_llm_calls: u32,
-    latest_user_message: Option<&str>,
-    conversation_tail: &str,
     python_command: &str,
 ) -> String {
     let mut prompt = String::new();
-    let _ = writeln!(prompt, "{ACTION_INSTRUCTIONS}");
     let _ = writeln!(
         prompt,
         "Expected final output fields:\n{}",
@@ -2171,18 +1745,11 @@ fn render_action_prompt(
         prompt,
         "Interpreter hint: when invoking Python via `exec_command`, use `{python_command}` (not bare `python`)."
     );
-    let latest_user = latest_user_message.unwrap_or("(none)");
     let _ = writeln!(prompt, "\nHost Conversation Anchors (authoritative):");
     let _ = writeln!(
         prompt,
-        "Latest user message extracted from full `conversation_history`:\n---\n{latest_user}\n---"
+        "Use `conversation_history` in REPL variables as the source of truth for user content."
     );
-    if !conversation_tail.trim().is_empty() {
-        let _ = writeln!(
-            prompt,
-            "Recent conversation tail (oldest -> newest):\n{conversation_tail}"
-        );
-    }
     let _ = writeln!(
         prompt,
         "Important: the controller prompt text is protocol guidance, not user conversation content."
@@ -2196,6 +1763,36 @@ fn render_action_prompt(
         let _ = writeln!(prompt, "\nCodex tool aliases available in Python:");
         let _ = writeln!(prompt, "{tools_documentation}");
     }
+    let _ = writeln!(prompt, "\nExecution model reminder:");
+    let _ = writeln!(
+        prompt,
+        "- Code executes inside the persistent Python REPL each iteration."
+    );
+    let _ = writeln!(
+        prompt,
+        "- Calling tool aliases in code (for example `exec_command(...)`) triggers host tool calls and returns results back into the REPL state."
+    );
+    let _ = writeln!(
+        prompt,
+        "- Assign tool results to variables and inspect them with `print`, e.g. `result = exec_command(cmd='ls -la', workdir='.')`; `print(result)`."
+    );
+    let _ = writeln!(
+        prompt,
+        "- Prefer keyword arguments that match each tool signature."
+    );
+    let _ = writeln!(prompt, "\nWorkspace completion requirements:");
+    let _ = writeln!(
+        prompt,
+        "- If the latest user request is a workspace/code action, do not SUBMIT until at least one successful write/edit tool call and one symptom-specific verification command have both run."
+    );
+    let _ = writeln!(
+        prompt,
+        "- Verification must test the user's reported issue directly (for example, confirm bad token is gone, expected token exists, and run compile/test command when relevant)."
+    );
+    let _ = writeln!(
+        prompt,
+        "- If the user reports \"still broken\", re-open the real file, patch again with tools, and re-run verification before SUBMIT."
+    );
 
     let history_text = if history.is_empty() {
         "You have not executed code yet.".to_string()
@@ -2679,6 +2276,19 @@ fn normalize_tool_call_arguments_for_native_rlm(
         return (args, kwargs);
     }
 
+    if !kwargs.contains_key("cmd")
+        && let Some(command_value) = kwargs.remove("command")
+    {
+        kwargs.insert("cmd".to_string(), command_value);
+    }
+
+    if !kwargs.contains_key("cmd")
+        && let Some(Value::String(_)) = args.first()
+    {
+        let cmd_value = args.remove(0);
+        kwargs.insert("cmd".to_string(), cmd_value);
+    }
+
     if let Some(cmd_value) = kwargs.get_mut("cmd")
         && let Some(cmd) = cmd_value.as_str()
         && let Some(rewritten_cmd) = rewrite_leading_python_command(cmd, python_command)
@@ -2689,11 +2299,19 @@ fn normalize_tool_call_arguments_for_native_rlm(
 
     if kwargs.is_empty()
         && let Some(Value::Object(object_args)) = args.first_mut()
-        && let Some(cmd_value) = object_args.get_mut("cmd")
-        && let Some(cmd) = cmd_value.as_str()
-        && let Some(rewritten_cmd) = rewrite_leading_python_command(cmd, python_command)
     {
-        *cmd_value = Value::String(rewritten_cmd);
+        if !object_args.contains_key("cmd")
+            && let Some(command_value) = object_args.remove("command")
+        {
+            object_args.insert("cmd".to_string(), command_value);
+        }
+
+        if let Some(cmd_value) = object_args.get_mut("cmd")
+            && let Some(cmd) = cmd_value.as_str()
+            && let Some(rewritten_cmd) = rewrite_leading_python_command(cmd, python_command)
+        {
+            *cmd_value = Value::String(rewritten_cmd);
+        }
     }
 
     (args, kwargs)
@@ -2724,6 +2342,93 @@ fn rewrite_leading_python_command(cmd: &str, python_command: &str) -> Option<Str
     Some(format!(
         "{leading_whitespace}{normalized_python_command}{remainder}"
     ))
+}
+
+fn normalize_native_rlm_tool_result(alias: &str, tool_name: &str, value: Value) -> Value {
+    if alias != "exec_command" && tool_name != "exec_command" {
+        return value;
+    }
+
+    let Value::String(text) = value else {
+        return value;
+    };
+
+    parse_wrapped_exec_command_output(&text).unwrap_or(Value::String(text))
+}
+
+fn parse_wrapped_exec_command_output(text: &str) -> Option<Value> {
+    let mut chunk_id: Option<String> = None;
+    let mut wall_time: Option<String> = None;
+    let mut exit_code: Option<i64> = None;
+    let mut original_token_count: Option<u64> = None;
+    let mut output_lines: Vec<&str> = Vec::new();
+    let mut saw_wrapper_metadata = false;
+    let mut collecting_output = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        if collecting_output {
+            output_lines.push(line);
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("Chunk ID:") {
+            chunk_id = Some(rest.trim().to_string());
+            saw_wrapper_metadata = true;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("Wall time:") {
+            wall_time = Some(rest.trim().to_string());
+            saw_wrapper_metadata = true;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("Process exited with code ") {
+            if let Ok(code) = rest.trim().parse::<i64>() {
+                exit_code = Some(code);
+            }
+            saw_wrapper_metadata = true;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("Original token count:") {
+            if let Ok(count) = rest.trim().parse::<u64>() {
+                original_token_count = Some(count);
+            }
+            saw_wrapper_metadata = true;
+            continue;
+        }
+        if trimmed == "Output:" {
+            saw_wrapper_metadata = true;
+            collecting_output = true;
+            continue;
+        }
+    }
+
+    if !saw_wrapper_metadata {
+        return None;
+    }
+
+    let mut normalized = Map::new();
+    normalized.insert("raw_text".to_string(), Value::String(text.to_string()));
+    normalized.insert("output".to_string(), Value::String(output_lines.join("\n")));
+    if let Some(code) = exit_code {
+        normalized.insert("exit_code".to_string(), Value::Number(code.into()));
+        normalized.insert("ok".to_string(), Value::Bool(code == 0));
+    }
+    if let Some(value) = chunk_id {
+        normalized.insert("chunk_id".to_string(), Value::String(value));
+    }
+    if let Some(value) = wall_time {
+        normalized.insert("wall_time".to_string(), Value::String(value));
+    }
+    if let Some(value) = original_token_count {
+        normalized.insert(
+            "original_token_count".to_string(),
+            Value::Number(value.into()),
+        );
+    }
+
+    Some(Value::Object(normalized))
 }
 
 fn build_tool_payload(
@@ -3138,50 +2843,46 @@ mod tests {
     }
 
     #[test]
-    fn compose_native_rlm_base_instructions_appends_dspy_guidance() {
+    fn compose_native_rlm_base_instructions_appends_native_rlm_guidance() {
         let base = BaseInstructions {
             text: "base instructions".to_string(),
         };
 
         let composed = compose_native_rlm_base_instructions(&base);
         assert!(composed.text.starts_with("base instructions"));
-        assert!(composed.text.contains(DSPY_RLM_SYSTEM_APPENDIX_MARKER));
+        assert!(composed.text.contains(NATIVE_RLM_SYSTEM_APPENDIX_MARKER));
         assert!(
             composed
                 .text
-                .contains("preserving Codex assistant behavior")
+                .contains("You have access to a Python REPL environment.")
         );
+        assert!(composed.text.contains("SUBMIT ONLY AFTER SEEING OUTPUTS"));
     }
 
     #[test]
-    fn native_rlm_prompts_include_chronology_guardrails() {
-        assert!(ACTION_INSTRUCTIONS.contains("latest unresolved request"));
-        assert!(ACTION_INSTRUCTIONS.contains("tail-first"));
-        assert!(ACTION_INSTRUCTIONS.contains("Iteration 1 is mandatory inspection-only"));
-        assert!(ACTION_INSTRUCTIONS.contains("reverse scan from end"));
-        assert!(ACTION_INSTRUCTIONS.contains("latest `role==\"user\"`"));
-        assert!(ACTION_INSTRUCTIONS.contains("Do not ask for a new task"));
-        assert!(ACTION_INSTRUCTIONS.contains("Non-coding requests are valid tasks"));
-        assert!(ACTION_INSTRUCTIONS.contains("You can execute tools from this REPL"));
-        assert!(ACTION_INSTRUCTIONS.contains("For chronology requests"));
-        assert!(ACTION_INSTRUCTIONS.contains("always use `cmd=...`"));
-        assert!(ACTION_INSTRUCTIONS.contains("kwargs only"));
-        assert!(DSPY_RLM_SYSTEM_APPENDIX.contains("first/last/earlier/previous-message"));
-        assert!(DSPY_RLM_SYSTEM_APPENDIX.contains("Core principles"));
-        assert!(DSPY_RLM_SYSTEM_APPENDIX.contains("latest unresolved user request"));
-        assert!(DSPY_RLM_SYSTEM_APPENDIX.contains("Iteration 1: inspect-only"));
-        assert!(DSPY_RLM_SYSTEM_APPENDIX.contains("tail context"));
-        assert!(DSPY_RLM_SYSTEM_APPENDIX.contains("continuation language"));
-        assert!(DSPY_RLM_SYSTEM_APPENDIX.contains("You can use tools in this REPL"));
-        assert!(DSPY_RLM_SYSTEM_APPENDIX.contains("fallback \"please provide a task\""));
-        assert!(DSPY_RLM_SYSTEM_APPENDIX.contains("kwargs-only tool calls"));
-        assert!(SUB_LLM_SYSTEM_INSTRUCTIONS.contains("tail-first interpretation"));
+    fn native_rlm_prompts_include_native_rlm_guidance() {
+        assert!(NATIVE_RLM_SYSTEM_APPENDIX.contains(NATIVE_RLM_SYSTEM_APPENDIX_MARKER));
+        assert!(
+            NATIVE_RLM_SYSTEM_APPENDIX.contains("You have access to a Python REPL environment.")
+        );
+        assert!(NATIVE_RLM_SYSTEM_APPENDIX.contains("Variables: {inputs}"));
+        assert!(NATIVE_RLM_SYSTEM_APPENDIX.contains("`SUBMIT({final_output_names})`"));
+        assert!(NATIVE_RLM_SYSTEM_APPENDIX.contains("EXPLORE FIRST"));
+        assert!(NATIVE_RLM_SYSTEM_APPENDIX.contains("ITERATE"));
+        assert!(NATIVE_RLM_SYSTEM_APPENDIX.contains("VERIFY BEFORE SUBMITTING"));
+        assert!(NATIVE_RLM_SYSTEM_APPENDIX.contains("SUBMIT ONLY AFTER SEEING OUTPUTS"));
+        assert!(NATIVE_RLM_SYSTEM_APPENDIX.contains(
+            "For workspace/code requests, you MUST use Codex tools to make real filesystem changes before SUBMIT."
+        ));
+        assert!(NATIVE_RLM_SYSTEM_APPENDIX.contains(
+            "For `exec_command`, always pass `cmd=...` and use an explicit `workdir=...` when touching files."
+        ));
     }
 
     #[test]
     fn compose_native_rlm_base_instructions_is_idempotent() {
         let base = BaseInstructions {
-            text: format!("base\n\n{DSPY_RLM_SYSTEM_APPENDIX}"),
+            text: format!("base\n\n{NATIVE_RLM_SYSTEM_APPENDIX}"),
         };
 
         let composed = compose_native_rlm_base_instructions(&base);
@@ -3189,14 +2890,13 @@ mod tests {
     }
 
     #[test]
-    fn compose_sub_llm_base_instructions_uses_plain_sub_model_prompt() {
+    fn compose_sub_llm_base_instructions_reuses_session_base_prompt() {
         let base = BaseInstructions {
-            text: "ignored".to_string(),
+            text: "base instructions".to_string(),
         };
 
         let composed = compose_sub_llm_base_instructions(&base);
-        assert_eq!(composed.text, SUB_LLM_SYSTEM_INSTRUCTIONS);
-        assert!(!composed.text.contains(DSPY_RLM_SYSTEM_APPENDIX_MARKER));
+        assert_eq!(composed, base);
     }
 
     #[test]
@@ -3569,110 +3269,38 @@ mod tests {
     }
 
     #[test]
-    fn latest_user_message_text_prefers_newest_user_entry() {
-        let history = json!([
-            {
-                "type": "message",
-                "role": "user",
-                "content": [{ "type": "input_text", "text": "older request" }]
-            },
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{ "type": "output_text", "text": "done" }]
-            },
-            {
-                "type": "message",
-                "role": "user",
-                "content": [{ "type": "input_text", "text": "latest request" }]
-            }
-        ]);
+    fn normalize_tool_result_parses_wrapped_exec_command_output() {
+        let wrapped = "Chunk ID: abc123\nWall time: 0.05 seconds\nProcess exited with code 2\nOriginal token count: 42\nOutput:\nrg: regex parse error";
+        let parsed = normalize_native_rlm_tool_result(
+            "exec_command",
+            "exec_command",
+            Value::String(wrapped.to_string()),
+        );
+        let Value::Object(parsed) = parsed else {
+            panic!("wrapped output should normalize to object");
+        };
         assert_eq!(
-            latest_user_message_text(&history),
-            Some("latest request".to_string())
+            parsed.get("chunk_id"),
+            Some(&Value::String("abc123".to_string()))
+        );
+        assert_eq!(
+            parsed.get("exit_code"),
+            Some(&Value::Number(serde_json::Number::from(2)))
+        );
+        assert_eq!(parsed.get("ok"), Some(&Value::Bool(false)));
+        assert_eq!(
+            parsed.get("output"),
+            Some(&Value::String("rg: regex parse error".to_string()))
         );
     }
 
     #[test]
-    fn iteration_one_code_inspection_detector_requires_history_and_observable_signal() {
-        assert!(iteration_one_code_has_required_history_inspection(
-            "print(len(conversation_history))"
-        ));
-        assert!(iteration_one_code_has_required_history_inspection(
-            "llm_query(str(conversation_history))"
-        ));
-        assert!(!iteration_one_code_has_required_history_inspection(
-            "SUBMIT(assistant_message='please provide a task')"
-        ));
-        assert!(!iteration_one_code_has_required_history_inspection(
-            "latest = conversation_history[-1]"
-        ));
-    }
-
-    #[test]
-    fn task_solicitation_guard_blocks_when_latest_user_message_exists() {
-        assert!(is_task_solicitation_message("please provide a task"));
-        assert!(is_task_solicitation_message(
-            "Please provide a specific task you want me to complete."
-        ));
-        assert!(is_task_solicitation_message(
-            "Please restate the specific task in one line if you want me to proceed immediately."
-        ));
-        assert!(should_block_task_solicitation(Some(
-            "can you add some new features to the mario thing"
-        )));
-        assert!(!should_block_task_solicitation(Some(
-            "<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>"
-        )));
-        assert!(is_meta_protocol_completion_message(
-            "Processed your RLM-mode instruction: inspected conversation history and completed the required submit step."
-        ));
-        assert!(is_meta_protocol_completion_message(
-            "Completed: I identified your latest request as protocol-compliant RLM execution and returned the required submission field."
-        ));
-    }
-
-    #[test]
-    fn workspace_request_detector_and_tool_invocation_detector_work() {
-        assert!(is_likely_workspace_edit_request("can you add world to it"));
-        assert!(is_likely_workspace_edit_request(
-            "create file hello.py with hello world"
-        ));
-        assert!(is_likely_workspace_edit_request(
-            "can you add some new features to the mario thing"
-        ));
-        assert!(!is_likely_workspace_edit_request("hi"));
-
-        let aliases = vec![
-            "llm_query".to_string(),
-            "llm_query_batched".to_string(),
-            "exec_command".to_string(),
-            "read_file".to_string(),
-        ];
-        assert!(code_invokes_external_tool_alias(
-            "result = exec_command(cmd='ls')",
-            &aliases
-        ));
-        assert!(!code_invokes_external_tool_alias(
-            "result = llm_query('hi')",
-            &aliases
-        ));
-        assert!(!code_invokes_external_tool_alias(
-            "print('hello')",
-            &aliases
-        ));
-        assert!(workspace_execution_failed(
-            "Process exited with code 2\nOutput:\nrg: Chunk: No such file or directory"
-        ));
-        assert!(!workspace_execution_failed(
-            "Process exited with code 0\nOutput:\nhello world"
-        ));
-        assert!(contains_unresolved_tool_wrapper_metadata(
-            "Chunk ID: abc123\nWall time: 0.05 seconds"
-        ));
-        assert!(!contains_unresolved_tool_wrapper_metadata(
-            "Updated index.html successfully."
-        ));
+    fn normalize_tool_result_leaves_non_exec_command_strings_unchanged() {
+        let value = Value::String("hello".to_string());
+        assert_eq!(
+            normalize_native_rlm_tool_result("read_file", "read_file", value.clone()),
+            value
+        );
     }
 
     #[test]
@@ -3748,5 +3376,63 @@ mod tests {
                 "workdir": "/tmp"
             })]
         );
+    }
+
+    #[test]
+    fn normalize_tool_call_arguments_promotes_exec_command_positional_cmd_with_kwargs() {
+        let binding = ToolBinding {
+            alias: "exec_command".to_string(),
+            tool_name: "exec_command".to_string(),
+            signature: "exec_command(cmd: str)".to_string(),
+            description: "Runs a command".to_string(),
+            kind: ToolBindingKind::Function,
+        };
+
+        let (args, kwargs) = normalize_tool_call_arguments_for_native_rlm(
+            &binding,
+            vec![Value::String("python script.py".to_string())],
+            Map::from_iter([("workdir".to_string(), Value::String("/tmp".to_string()))]),
+            "python3",
+        );
+
+        assert!(args.is_empty());
+        assert_eq!(
+            kwargs.get("workdir"),
+            Some(&Value::String("/tmp".to_string()))
+        );
+        assert_eq!(
+            kwargs.get("cmd"),
+            Some(&Value::String("python3 script.py".to_string()))
+        );
+    }
+
+    #[test]
+    fn normalize_tool_call_arguments_renames_exec_command_command_kwarg() {
+        let binding = ToolBinding {
+            alias: "exec_command".to_string(),
+            tool_name: "exec_command".to_string(),
+            signature: "exec_command(cmd: str)".to_string(),
+            description: "Runs a command".to_string(),
+            kind: ToolBindingKind::Function,
+        };
+
+        let (args, kwargs) = normalize_tool_call_arguments_for_native_rlm(
+            &binding,
+            Vec::new(),
+            Map::from_iter([(
+                "command".to_string(),
+                Value::String("python - <<'PY'\nprint('ok')\nPY".to_string()),
+            )]),
+            "python3",
+        );
+
+        assert!(args.is_empty());
+        assert_eq!(
+            kwargs.get("cmd"),
+            Some(&Value::String(
+                "python3 - <<'PY'\nprint('ok')\nPY".to_string()
+            ))
+        );
+        assert!(!kwargs.contains_key("command"));
     }
 }
