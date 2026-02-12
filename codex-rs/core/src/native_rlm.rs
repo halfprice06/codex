@@ -21,6 +21,7 @@ use crate::tools::spec::JsonSchema;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_async_utils::OrCancelExt;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -55,6 +56,7 @@ const DEFAULT_LLM_BATCH_CONCURRENCY: usize = 8;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 10_000;
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 180_000;
 const DEFAULT_PYTHON_COMMAND: &str = "python3";
+const DEFAULT_SUB_MODEL: &str = "gpt-5-mini";
 const PYTHON_REPL_TIMEOUT_ERROR_PREFIX: &str = "native_rlm Python REPL timed out after";
 const REPL_HISTORY_PROMPT_MAX_OUTPUT_CHARS: usize = 5_000;
 
@@ -66,6 +68,7 @@ const NATIVE_RLM_MAX_OUTPUT_CHARS_ENV: &str = "CODEX_NATIVE_RLM_MAX_OUTPUT_CHARS
 const NATIVE_RLM_EXEC_TIMEOUT_MS_ENV: &str = "CODEX_NATIVE_RLM_EXEC_TIMEOUT_MS";
 const NATIVE_RLM_PYTHON_COMMAND_ENV: &str = "CODEX_NATIVE_RLM_PYTHON_COMMAND";
 const NATIVE_RLM_VERBOSE_ENV: &str = "CODEX_NATIVE_RLM_VERBOSE";
+const NATIVE_RLM_SUB_MODEL_ENV: &str = "CODEX_NATIVE_RLM_SUB_MODEL";
 
 const NATIVE_RLM_SYSTEM_APPENDIX_MARKER: &str = "## Native Recursive Language Model (RLM)";
 const NATIVE_RLM_SYSTEM_APPENDIX: &str = r#"
@@ -95,6 +98,124 @@ IMPORTANT: This is ITERATIVE. Each code block you write will execute, you'll see
 11. If a tool call fails (argument parse error, non-zero exit, apply_patch verification failure), do not claim success. Retry with corrected commands and verify again.
 12. Never claim a file was changed unless tool output from this run shows the expected token/path changes.
 13. Python code blocks must be executable Python only. Put prose in `assistant_message` strings, never as bare code.
+14. Keep `reasoning` to 1-2 short sentences describing what this step does. All planning, explanation, and prose belong in code comments or `assistant_message`, not in reasoning.
+
+## Example trajectories
+
+Below are condensed examples showing correct iterative RLM usage. Each step shows reasoning, code, and output.
+
+### Example A: Create a file (workspace task)
+
+Step 1 — reasoning: "Explore workspace first." code:
+```python
+result = exec_command(cmd='ls -la', workdir='.')
+print(result)
+```
+output: {'output': 'total 0\ndrwxr-xr-x 2 user staff 64 ...', 'exit_code': 0, 'ok': True}
+
+Step 2 — reasoning: "Check what the user asked for." code:
+```python
+for entry in conversation_history:
+    if isinstance(entry, dict) and entry.get('role') == 'user':
+        for c in entry.get('content', []):
+            if isinstance(c, dict) and 'text' in c:
+                print(c['text'])
+```
+output: Create a hello world script in Python
+
+Step 3 — reasoning: "Write the file using apply_patch." code:
+```python
+patch = """*** /dev/null
+--- hello.py
+***************
+*** 0 ****
+--- 1,2 ----
++ #!/usr/bin/env python3
++ print("Hello, world!")
+"""
+result = apply_patch(patch=patch)
+print(result)
+```
+output: {'ok': True}
+
+Step 4 — reasoning: "Verify file exists and runs." code:
+```python
+result = exec_command(cmd='python3 hello.py', workdir='.')
+print(result)
+```
+output: {'output': 'Hello, world!', 'exit_code': 0, 'ok': True}
+
+Step 5 — reasoning: "File created and verified. Submit." code:
+```python
+SUBMIT(assistant_message="Created `hello.py` — a hello world script. Run with `python3 hello.py`.")
+```
+
+### Example B: Fix a bug (iterative debugging)
+
+Step 1 — reasoning: "Read the file to understand the bug." code:
+```python
+result = exec_command(cmd='cat app.py', workdir='.')
+print(result['output'])
+```
+output: def greet(name):\n    return f"Hello {naem}"\n
+
+Step 2 — reasoning: "Found typo: `naem` should be `name`. Fix with apply_patch." code:
+```python
+patch = """*** app.py
+--- app.py
+***************
+*** 1,2 ****
+  def greet(name):
+!     return f"Hello {naem}"
+--- 1,2 ----
+  def greet(name):
+!     return f"Hello {name}"
+"""
+result = apply_patch(patch=patch)
+print(result)
+```
+output: {'ok': True}
+
+Step 3 — reasoning: "Verify the fix — grep for the old typo, then test." code:
+```python
+r1 = exec_command(cmd='grep naem app.py', workdir='.')
+print("old token gone:", r1['exit_code'] != 0)
+r2 = exec_command(cmd='python3 -c "from app import greet; print(greet(\'World\'))"', workdir='.')
+print(r2['output'])
+```
+output: old token gone: True\nHello World
+
+Step 4 — reasoning: "Bug fixed and verified." code:
+```python
+SUBMIT(assistant_message="Fixed typo in `app.py`: `naem` → `name`. Verified the function returns correct output.")
+```
+
+### Example C: Analysis using conversation_history and llm_query
+
+Step 1 — reasoning: "Inspect the conversation data." code:
+```python
+print(f"Type: {type(conversation_history)}, Length: {len(conversation_history)}")
+user_msgs = [e for e in conversation_history if isinstance(e, dict) and e.get('role') == 'user']
+print(f"User messages: {len(user_msgs)}")
+for m in user_msgs[:2]:
+    for c in m.get('content', []):
+        if isinstance(c, dict):
+            print(c.get('text', '')[:200])
+```
+output: Type: <class 'list'>, Length: 5\nUser messages: 2\nSummarize the key themes in this document...
+
+Step 2 — reasoning: "Use llm_query for semantic analysis." code:
+```python
+text = user_msgs[0]['content'][0]['text']
+summary = llm_query(f"Summarize the key themes:\n{text}")
+print(summary[:500])
+```
+output: The document covers three main themes: (1) scalability challenges...
+
+Step 3 — reasoning: "Got good summary. Submit." code:
+```python
+SUBMIT(assistant_message=summary)
+```
 "#;
 
 const EXTRACT_INSTRUCTIONS: &str = r#"
@@ -237,6 +358,7 @@ pub(crate) struct NativeRlmSettings {
     exec_timeout_ms: u64,
     python_command: String,
     verbose: bool,
+    sub_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -249,6 +371,7 @@ struct NativeRlmEnvOverrides {
     exec_timeout_ms: Option<u64>,
     python_command: Option<String>,
     verbose: Option<bool>,
+    sub_model: Option<String>,
 }
 
 impl Default for NativeRlmSettings {
@@ -262,6 +385,7 @@ impl Default for NativeRlmSettings {
             exec_timeout_ms: DEFAULT_EXEC_TIMEOUT_MS,
             python_command: DEFAULT_PYTHON_COMMAND.to_string(),
             verbose: false,
+            sub_model: None,
         }
     }
 }
@@ -305,6 +429,14 @@ impl NativeRlmSettings {
                 .unwrap_or(DEFAULT_EXEC_TIMEOUT_MS),
             python_command: command,
             verbose: native_rlm.and_then(|cfg| cfg.verbose).unwrap_or(false),
+            sub_model: Some(
+                native_rlm
+                    .and_then(|cfg| cfg.sub_model.as_deref())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(DEFAULT_SUB_MODEL)
+                    .to_string(),
+            ),
         }
     }
 
@@ -337,6 +469,7 @@ impl NativeRlmSettings {
             exec_timeout_ms: parse_positive_u64(exec_timeout_ms).unwrap_or(DEFAULT_EXEC_TIMEOUT_MS),
             python_command: command,
             verbose: parse_bool(verbose).unwrap_or(false),
+            sub_model: Some(DEFAULT_SUB_MODEL.to_string()),
         }
     }
 
@@ -350,6 +483,7 @@ impl NativeRlmSettings {
             exec_timeout_ms,
             python_command,
             verbose,
+            sub_model,
         } = overrides;
 
         if let Some(enabled) = enabled {
@@ -376,6 +510,9 @@ impl NativeRlmSettings {
         if let Some(verbose) = verbose {
             self.verbose = verbose;
         }
+        if sub_model.is_some() {
+            self.sub_model = sub_model;
+        }
     }
 
     pub(crate) fn enabled(&self) -> bool {
@@ -387,14 +524,19 @@ impl NativeRlmSettings {
             return None;
         }
 
+        let sub_model_str = self
+            .sub_model
+            .as_deref()
+            .unwrap_or("(same as main)");
         Some(format!(
-            "Native RLM mode enabled:\n  max_iterations={}\n  max_llm_calls={}\n  llm_batch_concurrency={}\n  max_output_chars={}\n  exec_timeout_ms={}\n  python_command={}",
+            "Native RLM mode enabled:\n  max_iterations={}\n  max_llm_calls={}\n  llm_batch_concurrency={}\n  max_output_chars={}\n  exec_timeout_ms={}\n  python_command={}\n  sub_model={}",
             self.max_iterations,
             self.max_llm_calls,
             self.llm_batch_concurrency,
             self.max_output_chars,
             self.exec_timeout_ms,
-            self.python_command
+            self.python_command,
+            sub_model_str
         ))
     }
 }
@@ -409,6 +551,7 @@ impl NativeRlmEnvOverrides {
         let exec_timeout_ms = std::env::var(NATIVE_RLM_EXEC_TIMEOUT_MS_ENV).ok();
         let python_command = std::env::var(NATIVE_RLM_PYTHON_COMMAND_ENV).ok();
         let verbose = std::env::var(NATIVE_RLM_VERBOSE_ENV).ok();
+        let sub_model = std::env::var(NATIVE_RLM_SUB_MODEL_ENV).ok();
 
         Self {
             enabled: parse_bool(enabled.as_deref()),
@@ -423,6 +566,11 @@ impl NativeRlmEnvOverrides {
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
             verbose: parse_bool(verbose.as_deref()),
+            sub_model: sub_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
         }
     }
 }
@@ -563,20 +711,25 @@ impl FinalOutputSpec {
 struct ReplVariable {
     name: String,
     type_name: String,
+    description: String,
     total_length: usize,
     preview: String,
 }
 
 impl ReplVariable {
-    fn from_json(name: String, value: &Value, preview_chars: usize) -> Self {
+    fn from_json(name: String, value: &Value, preview_chars: usize, description: &str) -> Self {
         let value_text = if matches!(value, Value::Array(_) | Value::Object(_)) {
             serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
         } else {
             value.to_string()
         };
-        let is_truncated = value_text.chars().count() > preview_chars;
+        let total_chars = value_text.chars().count();
+        let is_truncated = total_chars > preview_chars;
         let preview = if is_truncated {
-            value_text.chars().take(preview_chars).collect::<String>() + "..."
+            let half = preview_chars / 2;
+            let head: String = value_text.chars().take(half).collect();
+            let tail: String = value_text.chars().skip(total_chars - half).collect();
+            format!("{head}...{tail}")
         } else {
             value_text.clone()
         };
@@ -584,16 +737,22 @@ impl ReplVariable {
         Self {
             name,
             type_name: json_type_name(value).to_string(),
+            description: description.to_string(),
             total_length: value_text.chars().count(),
             preview,
         }
     }
 
     fn format(&self) -> String {
-        format!(
-            "Variable: `{}`\nType: {}\nTotal length: {} chars\nPreview:\n```\n{}\n```",
-            self.name, self.type_name, self.total_length, self.preview
-        )
+        let mut out = format!("Variable: `{}` (access it in your code)\nType: {}\n", self.name, self.type_name);
+        if !self.description.is_empty() {
+            out.push_str(&format!("Description: {}\n", self.description));
+        }
+        out.push_str(&format!(
+            "Total length: {} chars\nPreview:\n```\n{}\n```",
+            self.total_length, self.preview
+        ));
+        out
     }
 }
 
@@ -606,31 +765,15 @@ struct ReplEntry {
 
 impl ReplEntry {
     fn format(&self, index: usize, max_output_chars: usize) -> String {
-        let output = if self.output.chars().count() > max_output_chars {
-            let truncated = self
-                .output
-                .chars()
-                .take(max_output_chars)
-                .collect::<String>();
-            format!(
-                "{truncated}\n... (truncated to {max_output_chars}/{})",
-                self.output.chars().count()
-            )
-        } else {
-            self.output.clone()
-        };
+        let raw_len = self.output.chars().count();
+        let output = format_output(&self.output, max_output_chars);
         let mut formatted = String::new();
         let _ = writeln!(formatted, "=== Step {} ===", index + 1);
         if !self.reasoning.is_empty() {
             let _ = writeln!(formatted, "Reasoning: {}", self.reasoning);
         }
         let _ = writeln!(formatted, "Code:\n```python\n{}\n```", self.code);
-        let _ = writeln!(
-            formatted,
-            "Output ({} chars):\n{}",
-            self.output.chars().count(),
-            output
-        );
+        let _ = writeln!(formatted, "Output ({raw_len} chars):\n{output}");
         formatted
     }
 }
@@ -832,6 +975,7 @@ struct NativeRlmRunner<'a> {
     tool_catalog: ToolCatalog,
     llm_calls_used: u32,
     tracker: SharedTurnDiffTracker,
+    sub_model_info: Option<ModelInfo>,
 }
 
 impl<'a> NativeRlmRunner<'a> {
@@ -843,7 +987,10 @@ impl<'a> NativeRlmRunner<'a> {
         let variables = build_variables_map(&history_for_prompt, history)?;
         let variable_infos = variables
             .iter()
-            .map(|(name, value)| ReplVariable::from_json(name.clone(), value, 500).format())
+            .map(|(name, value)| {
+                let description = variable_description(name);
+                ReplVariable::from_json(name.clone(), value, 500, description).format()
+            })
             .collect::<Vec<String>>();
         Ok((variables, variable_infos))
     }
@@ -894,7 +1041,7 @@ impl<'a> NativeRlmRunner<'a> {
             {
                 IterationOutcome::Continue => {
                     if restart_repl {
-                        self.restart_repl_after_timeout(&mut repl).await?;
+                        self.restart_repl_after_error(&mut repl).await?;
                     }
                 }
                 IterationOutcome::Final(message) => {
@@ -947,8 +1094,8 @@ impl<'a> NativeRlmRunner<'a> {
         let output_schema = Some(json!({
             "type": "object",
             "properties": {
-                "reasoning": { "type": "string" },
-                "code": { "type": "string" }
+                "reasoning": { "type": "string", "description": "1-2 sentences: what you will do this step and why." },
+                "code": { "type": "string", "description": "Executable Python code only." }
             },
             "required": ["reasoning", "code"],
             "additionalProperties": false
@@ -970,7 +1117,13 @@ impl<'a> NativeRlmRunner<'a> {
         variable_infos: &[String],
         history: &[ReplEntry],
     ) -> CodexResult<String> {
-        let prompt_text = render_extract_prompt(variable_infos, history, &self.final_output_spec);
+        let conversation_context = self.extract_last_user_message().await;
+        let prompt_text = render_extract_prompt(
+            variable_infos,
+            history,
+            &self.final_output_spec,
+            &conversation_context,
+        );
         let output_schema = Some(self.final_output_spec.output_schema.clone());
 
         let text = self
@@ -1017,7 +1170,15 @@ impl<'a> NativeRlmRunner<'a> {
 
         loop {
             let event = match tokio::time::timeout(exec_timeout, repl.read_event()).await {
-                Ok(event) => event?,
+                Ok(Ok(event)) => event,
+                Ok(Err(err)) => {
+                    // REPL process crashed or exited — return as error so the loop can restart it
+                    return Ok(InterpreterResult::Error {
+                        error: err.to_string(),
+                        stdout: String::new(),
+                        traceback: String::new(),
+                    });
+                }
                 Err(_) => {
                     return Ok(InterpreterResult::Error {
                         error: format!(
@@ -1101,18 +1262,18 @@ impl<'a> NativeRlmRunner<'a> {
             result,
             InterpreterResult::Error { error, .. }
                 if is_python_repl_timeout_error(error)
+                    || error.contains("python interpreter exited unexpectedly")
+                    || error.contains("stdin closed")
         )
     }
 
-    async fn restart_repl_after_timeout(&self, repl: &mut PythonRepl) -> CodexResult<()> {
+    async fn restart_repl_after_error(&self, repl: &mut PythonRepl) -> CodexResult<()> {
         self.sess
             .send_event(
                 &self.turn_context,
                 EventMsg::Warning(WarningEvent {
-                    message: format!(
-                        "native_rlm restarting Python REPL after timeout (exec_timeout_ms={})",
-                        self.settings.exec_timeout_ms
-                    ),
+                    message: "native_rlm restarting Python REPL after error (timeout or crash)"
+                        .to_string(),
                 }),
             )
             .await;
@@ -1213,6 +1374,7 @@ impl<'a> NativeRlmRunner<'a> {
         let turn_metadata_header = self.turn_metadata_header.map(ToOwned::to_owned);
         let base_instructions = self.sub_llm_base_instructions.clone();
         let llm_batch_concurrency = self.settings.llm_batch_concurrency;
+        let sub_model_info = self.sub_model_info.clone();
 
         let mut outputs = vec![Value::Null; prompts.len()];
         let results = futures::stream::iter(prompts.into_iter().enumerate())
@@ -1222,6 +1384,7 @@ impl<'a> NativeRlmRunner<'a> {
                 let cancellation_token = cancellation_token.child_token();
                 let turn_metadata_header = turn_metadata_header.clone();
                 let base_instructions = base_instructions.clone();
+                let sub_model_info = sub_model_info.clone();
                 async move {
                     let mut client_session = sess.services.model_client.new_session();
                     let result = query_model_text_with_session(
@@ -1234,6 +1397,7 @@ impl<'a> NativeRlmRunner<'a> {
                         None,
                         base_instructions,
                         None,
+                        sub_model_info.as_ref(),
                     )
                     .await;
                     (index, result)
@@ -1276,6 +1440,7 @@ impl<'a> NativeRlmRunner<'a> {
             None,
             self.sub_llm_base_instructions.clone(),
             None,
+            self.sub_model_info.as_ref(),
         )
         .await
     }
@@ -1344,6 +1509,7 @@ impl<'a> NativeRlmRunner<'a> {
             output_schema,
             base_instructions,
             personality,
+            None, // main RLM uses the primary model
         )
         .await
     }
@@ -1421,6 +1587,28 @@ impl<'a> NativeRlmRunner<'a> {
                 }
             }
         }
+    }
+
+    async fn extract_last_user_message(&self) -> String {
+        let history = self.sess.clone_history().await.for_prompt();
+        for item in history.iter().rev() {
+            if let ResponseItem::Message { role, content, .. } = item {
+                if role == "user" {
+                    let text = content
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            ContentItem::InputText { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<&str>>()
+                        .join("\n");
+                    if !text.is_empty() {
+                        return text;
+                    }
+                }
+            }
+        }
+        String::new()
     }
 
     async fn emit_turn_diff_if_any(&self) {
@@ -1518,6 +1706,17 @@ pub(crate) async fn maybe_run_turn(
         .await;
     }
 
+    let sub_model_info = if let Some(ref slug) = settings.sub_model {
+        Some(
+            sess.services
+                .models_manager
+                .get_model_info(slug, &turn_context.config)
+                .await,
+        )
+    } else {
+        None
+    };
+
     let runner = NativeRlmRunner {
         sess,
         turn_context,
@@ -1532,6 +1731,7 @@ pub(crate) async fn maybe_run_turn(
         tool_catalog,
         llm_calls_used: 0,
         tracker,
+        sub_model_info,
     };
 
     runner.run(input).await
@@ -1548,6 +1748,7 @@ async fn query_model_text_with_session(
     output_schema: Option<Value>,
     base_instructions: BaseInstructions,
     personality: Option<crate::config::types::Personality>,
+    model_info_override: Option<&ModelInfo>,
 ) -> CodexResult<String> {
     let prompt = Prompt {
         input: vec![ResponseItem::Message {
@@ -1566,10 +1767,11 @@ async fn query_model_text_with_session(
         output_schema,
     };
 
+    let effective_model_info = model_info_override.unwrap_or(&turn_context.model_info);
     let mut stream = client_session
         .stream(
             &prompt,
-            &turn_context.model_info,
+            effective_model_info,
             &turn_context.otel_manager,
             turn_context.reasoning_effort,
             turn_context.reasoning_summary,
@@ -1697,6 +1899,16 @@ fn compose_conversation_history(
     Ok(conversation_history)
 }
 
+fn variable_description(name: &str) -> &str {
+    match name {
+        "conversation_history" => "Full conversation history including user messages and native_rlm_step entries. Contains mixed entry types; use type checks and .get(...) for safe access.",
+        "directory" => "The current working directory path.",
+        "file_map" => "Map of file paths in the workspace.",
+        "query" => "The user's current query or request.",
+        _ => "",
+    }
+}
+
 fn build_variables_map(
     history_for_prompt: &[ResponseItem],
     repl_history: &[ReplEntry],
@@ -1813,8 +2025,15 @@ fn render_extract_prompt(
     variable_infos: &[String],
     history: &[ReplEntry],
     final_output_spec: &FinalOutputSpec,
+    conversation_context: &str,
 ) -> String {
     let mut prompt = String::new();
+    if !conversation_context.is_empty() {
+        let _ = writeln!(
+            prompt,
+            "The trajectory was generated for the following task:\n{conversation_context}\n"
+        );
+    }
     let _ = writeln!(prompt, "{EXTRACT_INSTRUCTIONS}");
     let _ = writeln!(
         prompt,
@@ -1895,8 +2114,11 @@ fn format_output(output: &str, max_chars: usize) -> String {
         return output.to_string();
     }
 
-    let truncated = output.chars().take(max_chars).collect::<String>();
-    format!("{truncated}\n... (truncated)")
+    let half = max_chars / 2;
+    let head: String = output.chars().take(half).collect();
+    let tail: String = output.chars().skip(char_count - half).collect();
+    let omitted = char_count - max_chars;
+    format!("{head}\n\n... ({omitted} characters omitted) ...\n\n{tail}")
 }
 
 fn parse_final_output(
@@ -1954,6 +2176,18 @@ fn parse_final_output(
                     "{field_name}: expected {expected}, got {}",
                     json_type_name(&field_value)
                 ));
+            }
+        }
+        // Validate enum constraints (covers Literal types in JSON Schema)
+        if let Some(Value::Array(allowed)) = field_schema.get("enum") {
+            if let Some(current_value) = object.get(field_name) {
+                if !allowed.contains(current_value) {
+                    type_errors.push(format!(
+                        "{field_name}: value {} not in allowed values {}",
+                        current_value,
+                        Value::Array(allowed.clone())
+                    ));
+                }
             }
         }
     }
@@ -2226,6 +2460,64 @@ fn make_unique_alias(tool_name: &str, used_aliases: &mut HashSet<String>) -> Str
     }
 }
 
+/// Names that must not be used as tool aliases in the Python REPL.
+const PYTHON_RESERVED_NAMES: &[&str] = &[
+    // RLM system functions
+    "llm_query",
+    "llm_query_batched",
+    "SUBMIT",
+    // Python keywords (complete set for Python 3.12+)
+    "False",
+    "None",
+    "True",
+    "and",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "class",
+    "continue",
+    "def",
+    "del",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "from",
+    "global",
+    "if",
+    "import",
+    "in",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "try",
+    "while",
+    "with",
+    "yield",
+    // Critical built-ins used in the REPL preamble or commonly shadowed
+    "print",
+    "exec",
+    "eval",
+    "input",
+    "globals",
+    "locals",
+    "vars",
+    "dir",
+    "type",
+    "isinstance",
+    "len",
+    "range",
+    "open",
+];
+
 fn sanitize_python_identifier(name: &str) -> String {
     let mut sanitized = String::new();
     for (index, character) in name.chars().enumerate() {
@@ -2244,22 +2536,7 @@ fn sanitize_python_identifier(name: &str) -> String {
         sanitized.push_str("tool");
     }
 
-    if matches!(
-        sanitized.as_str(),
-        "llm_query"
-            | "llm_query_batched"
-            | "SUBMIT"
-            | "print"
-            | "class"
-            | "def"
-            | "for"
-            | "while"
-            | "if"
-            | "else"
-            | "try"
-            | "except"
-            | "return"
-    ) {
+    if PYTHON_RESERVED_NAMES.contains(&sanitized.as_str()) {
         format!("{sanitized}_tool")
     } else {
         sanitized
@@ -2710,6 +2987,7 @@ mod tests {
                 exec_timeout_ms: DEFAULT_EXEC_TIMEOUT_MS,
                 python_command: DEFAULT_PYTHON_COMMAND.to_string(),
                 verbose: false,
+                sub_model: Some(DEFAULT_SUB_MODEL.to_string()),
             }
         );
     }
@@ -2725,6 +3003,7 @@ mod tests {
             exec_timeout_ms: Some(4567),
             python_command: Some("python3 -X dev".to_string()),
             verbose: Some(true),
+            sub_model: None,
         }));
         assert_eq!(
             settings,
@@ -2737,6 +3016,7 @@ mod tests {
                 exec_timeout_ms: 4567,
                 python_command: "python3 -X dev".to_string(),
                 verbose: true,
+                sub_model: Some(DEFAULT_SUB_MODEL.to_string()),
             }
         );
     }
@@ -2752,6 +3032,7 @@ mod tests {
             exec_timeout_ms: Some(4567),
             python_command: Some("python3".to_string()),
             verbose: Some(false),
+            sub_model: None,
         }));
 
         settings.apply_env_overrides(NativeRlmEnvOverrides {
@@ -2763,6 +3044,7 @@ mod tests {
             exec_timeout_ms: Some(9000),
             python_command: Some("python3 -X dev".to_string()),
             verbose: Some(true),
+            sub_model: None,
         });
 
         assert_eq!(
@@ -2776,6 +3058,7 @@ mod tests {
                 exec_timeout_ms: 9000,
                 python_command: "python3 -X dev".to_string(),
                 verbose: true,
+                sub_model: Some(DEFAULT_SUB_MODEL.to_string()),
             }
         );
     }
@@ -2817,6 +3100,7 @@ mod tests {
                 exec_timeout_ms: 4567,
                 python_command: "python3 -X dev".to_string(),
                 verbose: true,
+                sub_model: Some(DEFAULT_SUB_MODEL.to_string()),
             }
         );
     }
@@ -3097,9 +3381,10 @@ mod tests {
 
     #[test]
     fn format_output_truncates_long_text() {
+        // With max_chars=3, half=1 → head="a", tail="f", omitted=3
         let output = "abcdef";
         let formatted = format_output(output, 3);
-        assert_eq!(formatted, "abc\n... (truncated)");
+        assert_eq!(formatted, "a\n\n... (3 characters omitted) ...\n\nf");
     }
 
     #[test]
@@ -3112,8 +3397,10 @@ mod tests {
         let formatted = entry.format(0, 3);
         assert!(formatted.contains("=== Step 1 ==="));
         assert!(formatted.contains("Output (6 chars):"));
-        assert!(formatted.contains("abc"));
-        assert!(formatted.contains("... (truncated to 3/6)"));
+        // Head+tail: head="a", tail="f"
+        assert!(formatted.contains("a"));
+        assert!(formatted.contains("... (3 characters omitted) ..."));
+        assert!(formatted.contains("f"));
     }
 
     #[test]
@@ -3434,5 +3721,231 @@ mod tests {
             ))
         );
         assert!(!kwargs.contains_key("command"));
+    }
+
+    // ── New tests for gap fixes ────────────────────────────────────────
+
+    #[test]
+    fn format_output_head_tail_preserves_short_text() {
+        assert_eq!(format_output("abc", 10), "abc");
+    }
+
+    #[test]
+    fn format_output_head_tail_shows_omission_count() {
+        // 10 chars, max 4 → half=2, head="ab", tail="ij", omitted=6
+        let output = "abcdefghij";
+        let formatted = format_output(output, 4);
+        assert!(formatted.starts_with("ab"));
+        assert!(formatted.ends_with("ij"));
+        assert!(formatted.contains("6 characters omitted"));
+    }
+
+    #[test]
+    fn format_output_empty_shows_hint() {
+        assert_eq!(
+            format_output("   \n  ", 100),
+            "(no output - did you forget to print?)"
+        );
+    }
+
+    #[test]
+    fn repl_variable_preview_uses_head_tail() {
+        // Build a long JSON string value
+        let long_value: String = (0..200).map(|i| (b'a' + (i % 26)) as char).collect();
+        let json_val = Value::String(long_value);
+        let var = ReplVariable::from_json("test".to_string(), &json_val, 20, "");
+        // Preview should contain "..." from head+tail truncation
+        assert!(var.preview.contains("..."));
+        // Should not be the full string
+        assert!(var.preview.len() < 210);
+    }
+
+    #[test]
+    fn repl_variable_description_shown_when_present() {
+        let var = ReplVariable {
+            name: "x".to_string(),
+            type_name: "str".to_string(),
+            description: "A test variable".to_string(),
+            total_length: 5,
+            preview: "hello".to_string(),
+        };
+        let formatted = var.format();
+        assert!(formatted.contains("Description: A test variable"));
+    }
+
+    #[test]
+    fn repl_variable_description_hidden_when_empty() {
+        let var = ReplVariable {
+            name: "x".to_string(),
+            type_name: "str".to_string(),
+            description: String::new(),
+            total_length: 5,
+            preview: "hello".to_string(),
+        };
+        let formatted = var.format();
+        assert!(!formatted.contains("Description:"));
+    }
+
+    #[test]
+    fn variable_description_returns_known_descriptions() {
+        assert!(!variable_description("conversation_history").is_empty());
+        assert!(!variable_description("directory").is_empty());
+        assert_eq!(variable_description("unknown_var"), "");
+    }
+
+    #[test]
+    fn parse_final_output_validates_enum_constraints() {
+        let spec = FinalOutputSpec::from_turn_schema(Some(&json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["success", "failure", "pending"]
+                }
+            },
+            "required": ["status"],
+            "additionalProperties": false
+        })));
+
+        // Valid enum value
+        let ok = parse_final_output(json!({ "status": "success" }), &spec);
+        assert!(ok.is_ok());
+
+        // Invalid enum value
+        let bad = parse_final_output(json!({ "status": "unknown" }), &spec);
+        assert!(bad.is_err());
+        let err = bad.unwrap_err();
+        assert!(err.contains("not in allowed values"));
+    }
+
+    #[test]
+    fn should_restart_repl_after_crash_errors() {
+        let crash = InterpreterResult::Error {
+            error: "python interpreter exited unexpectedly".to_string(),
+            stdout: String::new(),
+            traceback: String::new(),
+        };
+        assert!(NativeRlmRunner::should_restart_repl_after_result(&crash));
+
+        let stdin = InterpreterResult::Error {
+            error: "stdin closed".to_string(),
+            stdout: String::new(),
+            traceback: String::new(),
+        };
+        assert!(NativeRlmRunner::should_restart_repl_after_result(&stdin));
+
+        let normal_error = InterpreterResult::Error {
+            error: "NameError: name 'x' is not defined".to_string(),
+            stdout: String::new(),
+            traceback: String::new(),
+        };
+        assert!(!NativeRlmRunner::should_restart_repl_after_result(
+            &normal_error
+        ));
+
+        let output = InterpreterResult::Output {
+            stdout: "hello".to_string(),
+        };
+        assert!(!NativeRlmRunner::should_restart_repl_after_result(&output));
+    }
+
+    #[test]
+    fn sanitize_python_identifier_rejects_all_keywords() {
+        for keyword in &[
+            "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
+            "continue", "def", "del", "elif", "else", "except", "finally", "for", "from",
+            "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass",
+            "raise", "return", "try", "while", "with", "yield",
+        ] {
+            let result = sanitize_python_identifier(keyword);
+            assert_eq!(
+                result,
+                format!("{keyword}_tool"),
+                "keyword '{keyword}' should be suffixed"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_python_identifier_rejects_critical_builtins() {
+        for builtin in &[
+            "print", "exec", "eval", "input", "globals", "locals", "vars", "dir", "type",
+            "isinstance", "len", "range", "open",
+        ] {
+            let result = sanitize_python_identifier(builtin);
+            assert_eq!(
+                result,
+                format!("{builtin}_tool"),
+                "built-in '{builtin}' should be suffixed"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_python_identifier_rejects_rlm_system_names() {
+        assert_eq!(sanitize_python_identifier("llm_query"), "llm_query_tool");
+        assert_eq!(
+            sanitize_python_identifier("llm_query_batched"),
+            "llm_query_batched_tool"
+        );
+        assert_eq!(sanitize_python_identifier("SUBMIT"), "SUBMIT_tool");
+    }
+
+    #[test]
+    fn render_extract_prompt_includes_conversation_context() {
+        let spec = FinalOutputSpec::default_assistant_message();
+        let prompt = render_extract_prompt(&[], &[], &spec, "Summarize the meeting notes");
+        assert!(prompt.contains("Summarize the meeting notes"));
+        assert!(prompt.contains("trajectory was generated for the following task"));
+    }
+
+    #[test]
+    fn render_extract_prompt_omits_context_when_empty() {
+        let spec = FinalOutputSpec::default_assistant_message();
+        let prompt = render_extract_prompt(&[], &[], &spec, "");
+        assert!(!prompt.contains("trajectory was generated"));
+    }
+
+    #[test]
+    fn native_rlm_settings_sub_model_from_config() {
+        let settings = NativeRlmSettings::from_config_values(Some(&NativeRlmToml {
+            enabled: Some(true),
+            max_iterations: None,
+            max_llm_calls: None,
+            llm_batch_concurrency: None,
+            max_output_chars: None,
+            exec_timeout_ms: None,
+            python_command: None,
+            verbose: None,
+            sub_model: Some("o4-mini".to_string()),
+        }));
+        assert_eq!(settings.sub_model, Some("o4-mini".to_string()));
+    }
+
+    #[test]
+    fn native_rlm_settings_sub_model_env_override() {
+        let mut settings = NativeRlmSettings::from_config_values(Some(&NativeRlmToml {
+            enabled: Some(true),
+            max_iterations: None,
+            max_llm_calls: None,
+            llm_batch_concurrency: None,
+            max_output_chars: None,
+            exec_timeout_ms: None,
+            python_command: None,
+            verbose: None,
+            sub_model: Some("o4-mini".to_string()),
+        }));
+        settings.apply_env_overrides(NativeRlmEnvOverrides {
+            enabled: None,
+            max_iterations: None,
+            max_llm_calls: None,
+            llm_batch_concurrency: None,
+            max_output_chars: None,
+            exec_timeout_ms: None,
+            python_command: None,
+            verbose: None,
+            sub_model: Some("gpt-4o".to_string()),
+        });
+        assert_eq!(settings.sub_model, Some("gpt-4o".to_string()));
     }
 }

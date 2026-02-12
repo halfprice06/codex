@@ -5,4 +5,4 @@ pub const CODEX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const CODEX_DISPLAY_NAME: &str = "OpenAI CodexRLM";
 
 /// Version shown alongside TUI header card branding.
-pub const CODEX_DISPLAY_VERSION: &str = "0.0.1";
+pub const CODEX_DISPLAY_VERSION: &str = "0.0.2";

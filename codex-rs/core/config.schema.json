@@ -552,6 +552,10 @@
         "verbose": {
           "description": "Enables verbose native-RLM trajectory logging.",
           "type": "boolean"
+        },
+        "sub_model": {
+          "description": "Optional model slug for sub-LLM queries (llm_query/llm_query_batched). When set, sub-queries use this (typically cheaper/faster) model instead of the main agent model.",
+          "type": "string"
         }
       },
       "type": "object"

@@ -39,6 +39,7 @@ max_output_chars = 10000
 exec_timeout_ms = 180000
 python_command = "python3"
 verbose = true
+sub_model = "gpt-5-mini"  # model for llm_query sub-calls (default: gpt-5-mini)
 ```
 
 `CODEX_NATIVE_RLM*` environment variables are still supported and take precedence over

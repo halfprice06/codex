@@ -44,6 +44,7 @@ const DEFAULT_NATIVE_RLM_MAX_OUTPUT_CHARS: usize = 10_000;
 const DEFAULT_NATIVE_RLM_EXEC_TIMEOUT_MS: u64 = 180_000;
 const DEFAULT_NATIVE_RLM_PYTHON_COMMAND: &str = "python3";
 const DEFAULT_NATIVE_RLM_VERBOSE: bool = true;
+const DEFAULT_NATIVE_RLM_SUB_MODEL: &str = "gpt-5-mini";
 
 #[cfg(target_os = "macos")]
 mod app_cmd;
@@ -977,6 +978,10 @@ fn native_rlm_bootstrap_edits(config: &TomlValue) -> Vec<ApiConfigEdit> {
         "verbose",
         serde_json::Value::from(DEFAULT_NATIVE_RLM_VERBOSE),
     );
+    push_if_missing(
+        "sub_model",
+        serde_json::Value::from(DEFAULT_NATIVE_RLM_SUB_MODEL),
+    );
 
     edits
 }
@@ -1256,6 +1261,7 @@ mod tests {
                 "native_rlm.exec_timeout_ms",
                 "native_rlm.python_command",
                 "native_rlm.verbose",
+                "native_rlm.sub_model",
             ]
         );
     }
@@ -1282,6 +1288,7 @@ mod tests {
                 "native_rlm.exec_timeout_ms",
                 "native_rlm.python_command",
                 "native_rlm.verbose",
+                "native_rlm.sub_model",
             ]
         );
     }
@@ -1299,6 +1306,7 @@ mod tests {
             exec_timeout_ms = 180000
             python_command = "python3"
             verbose = true
+            sub_model = "gpt-5-mini"
             "#,
         )
         .expect("parse config");

@@ -413,6 +413,10 @@ pub struct NativeRlmToml {
 
     /// Enables verbose native-RLM trajectory logging.
     pub verbose: Option<bool>,
+
+    /// Optional model slug for sub-LLM queries (llm_query/llm_query_batched).
+    /// When set, sub-queries use this (typically cheaper/faster) model instead of the main agent model.
+    pub sub_model: Option<String>,
 }
 
 // ===== OTEL configuration =====
